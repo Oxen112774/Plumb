@@ -2,6 +2,7 @@ package probe
 
 import (
 	"fmt"
+	"strconv"
 	"strings"
 )
 
@@ -61,51 +62,99 @@ func (c CPUTimes) Delta(prev CPUTimes) CPUTimes {
 
 // ReadCPU reads the aggregate "cpu " line from /proc/stat.
 func ReadCPU(r Root) (CPUTimes, error) {
+	agg, _, err := ReadCPUAll(r)
+	return agg, err
+}
+
+// ReadCPUAll reads the aggregate line and every per-core line in one pass.
+//
+// Both come out of the same file, so reading it twice would copy the same
+// kernel data twice for no reason.
+//
+// The per-core data is not decoration. The average hides the failure that
+// matters most on a multi-core box: one core pinned at 100% while the rest
+// idle. That machine reports "CPU 15%" and looks healthy while every request
+// touching the single-threaded component queues behind that one core.
+func ReadCPUAll(r Root) (CPUTimes, []CPUCore, error) {
 	data, err := r.ReadFile("proc/stat")
 	if err != nil {
-		return CPUTimes{}, fmt.Errorf("read proc/stat: %w", err)
+		return CPUTimes{}, nil, fmt.Errorf("read proc/stat: %w", err)
 	}
 
-	var out CPUTimes
-	found := false
+	var (
+		agg   CPUTimes
+		cores []CPUCore
+		found bool
+	)
 	err = lines(data, func(line string) error {
-		// The aggregate line is exactly "cpu " followed by the counters.
-		// Per-core lines are "cpu0", "cpu1", ... and must not match.
-		if !strings.HasPrefix(line, "cpu ") {
+		if !strings.HasPrefix(line, "cpu") {
 			return nil
 		}
-		fields := strings.Fields(line)[1:]
-		if len(fields) < 8 {
-			return fmt.Errorf("proc/stat cpu line has %d fields, want at least 8", len(fields))
-		}
-		var vals [8]uint64
-		for i := 0; i < 8; i++ {
-			v, err := atou(fields[i])
-			if err != nil {
-				return fmt.Errorf("proc/stat cpu field %d (%q): %w", i, fields[i], err)
+		rest := line[3:]
+		if rest == "" || rest[0] < '0' || rest[0] > '9' {
+			// The aggregate line is exactly "cpu " followed by the counters.
+			// Per-core lines are "cpu0", "cpu1", ... and must not match.
+			fields := strings.Fields(line)[1:]
+			// A modern kernel always prints all eight counters; fewer means
+			// the line is not what we think it is.
+			if len(fields) < 8 {
+				return fmt.Errorf("proc/stat cpu line has %d fields, want at least 8", len(fields))
 			}
-			vals[i] = v
+			vals, err := parseCPUCounterFields(fields, "cpu")
+			if err != nil {
+				return err
+			}
+			agg, found = vals, true
+			return nil
 		}
-		out = CPUTimes{
-			User:    vals[0],
-			Nice:    vals[1],
-			System:  vals[2],
-			Idle:    vals[3],
-			IOWait:  vals[4],
-			IRQ:     vals[5],
-			SoftIRQ: vals[6],
-			Steal:   vals[7],
+
+		fields := strings.Fields(rest)
+		if len(fields) < 5 {
+			return fmt.Errorf("proc/stat core line %q has %d fields, want an id and at least 4 counters", line, len(fields))
 		}
-		found = true
-		return errStop
+		id, err := strconv.Atoi(fields[0])
+		if err != nil {
+			return fmt.Errorf("proc/stat core id %q: %w", fields[0], err)
+		}
+		// A kernel older than 2.6.11 prints four counters instead of eight.
+		// Missing columns are genuinely zero, not unparseable, so they are
+		// padded rather than treated as an error.
+		vals, err := parseCPUCounterFields(fields[1:], "cpu"+fields[0])
+		if err != nil {
+			return err
+		}
+		cores = append(cores, CPUCore{ID: id, Times: vals})
+		return nil
 	})
 	if err != nil {
-		return CPUTimes{}, err
+		return CPUTimes{}, nil, err
 	}
 	if !found {
-		return CPUTimes{}, fmt.Errorf("proc/stat: no aggregate cpu line")
+		return CPUTimes{}, nil, fmt.Errorf("proc/stat: no aggregate cpu line")
 	}
-	return out, nil
+	return agg, cores, nil
+}
+
+// parseCPUCounterFields maps the user..steal columns onto CPUTimes.
+func parseCPUCounterFields(fields []string, what string) (CPUTimes, error) {
+	var vals [8]uint64
+	for i := 0; i < 8 && i < len(fields); i++ {
+		v, err := atou(fields[i])
+		if err != nil {
+			return CPUTimes{}, fmt.Errorf("%s field %d (%q): %w", what, i, fields[i], err)
+		}
+		vals[i] = v
+	}
+	return CPUTimes{
+		User:    vals[0],
+		Nice:    vals[1],
+		System:  vals[2],
+		Idle:    vals[3],
+		IOWait:  vals[4],
+		IRQ:     vals[5],
+		SoftIRQ: vals[6],
+		Steal:   vals[7],
+	}, nil
 }
 
 // CountCores returns the number of logical CPUs the kernel schedules onto.
@@ -122,27 +171,12 @@ func ReadCPU(r Root) (CPUTimes, error) {
 // CPUs here; reading cgroup cpu.max is the correct refinement, and is not yet
 // implemented.)
 func CountCores(r Root) (int, error) {
-	data, err := r.ReadFile("proc/stat")
-	if err != nil {
-		return 0, fmt.Errorf("read proc/stat: %w", err)
-	}
-	n := 0
-	err = lines(data, func(line string) error {
-		if !strings.HasPrefix(line, "cpu") {
-			return nil
-		}
-		rest := line[3:]
-		if rest == "" || rest[0] < '0' || rest[0] > '9' {
-			return nil // the aggregate "cpu " line, not a per-core line
-		}
-		n++
-		return nil
-	})
+	_, cores, err := ReadCPUAll(r)
 	if err != nil {
 		return 0, err
 	}
-	if n == 0 {
+	if len(cores) == 0 {
 		return 0, fmt.Errorf("proc/stat: no per-cpu lines")
 	}
-	return n, nil
+	return len(cores), nil
 }

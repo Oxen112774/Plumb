@@ -5,4 +5,4 @@ Pid:	3000
 PPid:	1
 Uid:	1000	1000	1000	1000
 Gid:	1000	1000	1000	1000
-Threads:	8
+Threads:	3

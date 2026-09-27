@@ -1,0 +1,157 @@
+plumb · 服务器卡顿归因
+prod-db-01 · Linux 5.15.0-91-generic · 4 核 · 已运行 12 天 0 小时
+采样 2026-09-27 11:41:34 · 间隔 1s · 两次采样
+
+判定（7 项）
+
+  !!!  磁盘 IO
+      磁盘让整机停摆 —— 过去 10 秒有 17.4% 的时间所有任务都在等它
+
+      元凶进程
+        PID 1234    mysqld             [mysql]
+                     读 40.1 MiB/s，写 976.6 KiB/s
+                     /usr/sbin/mysqld --defaults-file=/etc/mysql/my.cnf
+
+      证据
+        /proc/pressure/io  full avg10=17.40 avg60=12.10 avg300=6.80
+        /proc/pressure/io  some avg10=42.10（至少一个任务在等磁盘）
+
+      怎么办
+        先确认是谁在写：pidstat -d 1 或 iotop -o。数据库重点看全表扫描、
+        fsync 过频、刷盘策略；日志服务重点看级别和同步落盘。多数情况下降低
+        队列深度（合并小写、延长 write-back）比换盘更有效。
+
+   !   内存
+      内存不足 —— 过去 10 秒有 3.2% 的时间系统在等内存回收
+
+      元凶进程
+        PID 3000    node               [app]
+                     常驻内存 4.6 GiB
+                     node /home/app/server.js --port=8080
+        PID 1234    mysqld             [mysql]
+                     常驻内存 2.7 GiB
+                     /usr/sbin/mysqld --defaults-file=/etc/mysql/my.cnf
+
+      证据
+        /proc/pressure/memory full avg10=3.20 avg60=1.40 avg300=0.60
+        /proc/meminfo      MemTotal=15.6 GiB MemAvailable=5.8 GiB SwapUsed=192.5 MiB
+
+      怎么办
+        内存压力表现为回收停顿，不是单纯的百分比高。看下面谁的工作集最大；
+        如果能限制它的常驻内存就先限制，否则只能加内存。注意 swap
+        一旦被大量使用，响应时间会上升一个数量级。
+
+   !   被堵住的线程
+      有 3 个线程被内核堵住，动不了也杀不掉
+
+      元凶进程
+        PID 1234    mysqld
+                     线程 1240：等 ext4 日志提交  [jbd2_log_wait_commit]
+                     线程 1241：等磁盘 IO 完成  [io_schedule]
+                     持有文件：
+                       /var/lib/mysql/ib_logfile0
+                       /var/lib/mysql/ibdata1
+                       /var/lib/mysql/prod/orders.ibd
+                     /usr/sbin/mysqld --defaults-file=/etc/mysql/my.cnf
+        PID 3000    node
+                     线程 3001：缺页，要从磁盘读回来  [filemap_fault]
+                     持有文件：
+                       /home/app/server.js
+                       /var/log/app/app.log
+                       /var/lib/app/session.db
+                     node /home/app/server.js --port=8080
+
+      证据
+        /proc/<pid>/task   全机 13 个线程中 3 个处于 D 状态（不可中断睡眠，信号无法送达）
+        /proc/<pid>/wchan  wchan 给出线程此刻停在内核的哪个函数上，即它在等什么
+        /proc/<pid>/fd     被堵住的进程持有的普通文件；socket、pipe、anon_inode 与 /dev 已滤掉
+        plumb              D 状态是某一瞬间的采样：一两个通常是正常的同步写，数量持续偏高才说明存储真的顶不住
+        /proc/pressure/io  full avg10=17.40：与上面的被堵线程互相印证
+
+      怎么办
+        ext4 的日志必须先落盘，之后的写才算数。日志提交慢通常是小文件同步
+        写太多：把 fsync 改成批量提交，或把日志放到更快的盘上。D
+        状态的线程连 SIGKILL 都不会生效 —— 它会挂到 IO 完成为止，
+        所以碰到杀不掉的进程，别反复 kill：先看它卡在哪个内核函数、
+        手里拿着哪个文件，那才是真正在等的东西。
+
+   ·   CPU 被抢占
+      宿主机抢走了 5.0% 的 CPU
+
+      证据
+        /proc/stat         steal 占本窗口 CPU 时间的 5.00%
+        /proc/stat         同期 user=25.0% system=5.0% idle=57.5%
+
+      怎么办
+        steal 是虚拟机监控器把物理 CPU 分配给了同一宿主机上的其他租户。这
+        部分损耗不在你的程序里 —— 优化代码没有意义，应当换机型或联系服务商，
+        并要求查看宿主机超售比例。
+
+   ·   交换分区
+      交换分区已用 9.4%（192.5 MiB）
+
+      元凶进程
+        PID 3000    node               [app]
+                     常驻内存 4.6 GiB
+                     node /home/app/server.js --port=8080
+        PID 1234    mysqld             [mysql]
+                     常驻内存 2.7 GiB
+                     /usr/sbin/mysqld --defaults-file=/etc/mysql/my.cnf
+
+      证据
+        /proc/meminfo      SwapTotal=2.0 GiB SwapFree=1.8 GiB
+
+      怎么办
+        服务器上一旦有 swap 被实际使用，说明内存已经不够。换入换出会让响应
+        时间上升一个数量级，而且往往表现为“随机变慢”，
+        很难在日志里看出来。先找出工作集超标的进程。
+
+   ·   单核跑满
+      CPU0 已经跑满（99%），整机平均却只有 42.5%
+
+      元凶进程
+        PID 3000    node               [app]
+                     占用 1.1 核
+                     node /home/app/server.js --port=8080
+
+      证据
+        plumb              4 个核心中有 1 个被单个线程占满，其余核心空闲
+        /proc/stat         整机 busy=42.5% user=25.0% system=5.0%
+        /proc/stat         cpu0 busy=99.0% iowait=0.0% steal=5.0%
+
+      怎么办
+        单个核心满负荷而其他核心空闲，说明瓶颈是“一个线程干完全部活”，
+        不是 CPU 不够。加核心对这种结构没有任何帮助 —— 要动的是并发方式：
+        多开 worker 进程、把请求分片，或者把这个组件从单线程模型里拆出来。
+        反过来，如果这台机器还要继续跑别的服务，
+        被占满的那个核心也会让它们一起变慢。
+
+   ·   脏页
+      脏页堆积 375.0 MiB，内核即将被迫同步刷盘
+
+      元凶进程
+        PID 1234    mysqld             [mysql]
+                     读 40.1 MiB/s，写 976.6 KiB/s
+                     /usr/sbin/mysqld --defaults-file=/etc/mysql/my.cnf
+
+      证据
+        /proc/meminfo      Dirty=375.0 MiB Writeback=17.6 MiB
+        /proc/meminfo      MemTotal=15.6 GiB
+
+      怎么办
+        脏页超过 vm.dirty_ratio 后，内核会同步刷盘，之后所有 write()
+        都会阻塞数秒，应用表现为“随机卡顿”且日志里查不到原因。找出写入突增
+        的进程；若属正常业务量，调低 vm.dirty_ratio /
+        vm.dirty_background_ratio 可以让刷盘更平滑。
+
+概况
+  CPU      繁忙 42.5%   用户 25.0%   系统 5.0%   等磁盘 7.5%   被抢占 5.0%
+  核心     CPU0 99%  CPU1 26%  CPU2 23%  CPU3 22%
+  内存     已用 63.1%（9.9 GiB / 15.6 GiB）   交换 9.4%
+  负载     load1 2.21，4 核，每核 0.55
+  线程     共 13 个，其中 3 个处于 D 状态（不可中断，kill 不掉）
+  压力     cpu some 8.20%   io full 17.40%   memory full 3.20%
+
+未能测到（这些项不参与判定）
+  · disk space for /: probe: not supported on this platform
+

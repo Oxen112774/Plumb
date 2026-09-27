@@ -8,10 +8,10 @@ import (
 
 // Process is one task's cumulative counters, from /proc/<pid>.
 type Process struct {
-	PID    int    `json:"pid"`
-	Name   string `json:"name"`
-	User   string `json:"user,omitempty"`
-	UID    int    `json:"uid"`
+	PID  int    `json:"pid"`
+	Name string `json:"name"`
+	User string `json:"user,omitempty"`
+	UID  int    `json:"uid"`
 
 	// Cmdline is the full argument vector, space-joined and length-capped.
 	// Without it a culprit reads as "java" or "python3", which tells an
@@ -22,6 +22,14 @@ type Process struct {
 	STime    uint64 `json:"stime"`
 	MajFlt   uint64 `json:"majflt"`
 	RSSPages uint64 `json:"rss_pages"`
+
+	// NThreads comes from field 20, so the thread count is known even when
+	// the thread table is not walked.
+	NThreads uint64 `json:"nthreads"`
+
+	// BlkIOTicks is cumulative time blocked on block I/O (see procStatFields).
+	BlkIOTicks uint64 `json:"blkio_ticks"`
+	BlkIOKnown bool   `json:"blkio_known"`
 
 	ReadBytes  uint64 `json:"read_bytes"`
 	WriteBytes uint64 `json:"write_bytes"`
@@ -85,18 +93,21 @@ func readProcess(r Root, pid int) (Process, error) {
 	if err != nil {
 		return Process{}, err
 	}
-	name, utime, stime, majflt, rss, err := parseProcStat(statData)
+	st, err := parseProcStat(statData)
 	if err != nil {
 		return Process{}, err
 	}
 
 	p := Process{
-		PID:      pid,
-		Name:     name,
-		UTime:    utime,
-		STime:    stime,
-		MajFlt:   majflt,
-		RSSPages: rss,
+		PID:        pid,
+		Name:       st.Name,
+		UTime:      st.UTime,
+		STime:      st.STime,
+		MajFlt:     st.MajFlt,
+		RSSPages:   st.RSSPages,
+		NThreads:   st.NThreads,
+		BlkIOTicks: st.BlkIOTicks,
+		BlkIOKnown: st.BlkIOKnown,
 	}
 
 	if data, err := r.ReadFile(dir + "/io"); err == nil {
@@ -113,6 +124,33 @@ func readProcess(r Root, pid int) (Process, error) {
 	return p, nil
 }
 
+// procStatFields is the subset of /proc/<pid>/stat this tool uses.
+//
+// Field numbers below are the documented ones (proc(5)); the parser converts
+// to a zero-based index into the fields that follow comm.
+type procStatFields struct {
+	Name     string
+	State    byte   // field 3
+	MajFlt   uint64 // field 12
+	UTime    uint64 // field 14
+	STime    uint64 // field 15
+	NThreads uint64 // field 20
+	RSSPages uint64 // field 24
+
+	// BlkIOTicks is field 42, delayacct_blkio_ticks: cumulative time this task
+	// spent blocked on block I/O. It is the one counter that measures being
+	// stuck rather than being busy — a process doing a large fsync transfers
+	// almost nothing while being blocked for seconds, so every throughput
+	// ranking misses it.
+	//
+	// The field is only maintained when the kernel was built with
+	// CONFIG_TASK_DELAY_ACCT, so BlkIOKnown records whether the column was
+	// even present. A zero from an absent column must not be read as "this
+	// process never blocked".
+	BlkIOTicks uint64
+	BlkIOKnown bool
+}
+
 // parseProcStat extracts the fields we need from /proc/<pid>/stat.
 //
 // The comm field (field 2) is wrapped in parentheses and may itself contain
@@ -120,23 +158,25 @@ func readProcess(r Root, pid int) (Process, error) {
 // the whole line on whitespace is therefore wrong, and is the single most
 // common bug in readers of this file. The fields after comm are parsed
 // relative to the last ')' instead.
-func parseProcStat(data []byte) (name string, utime, stime, majflt, rssPages uint64, err error) {
+func parseProcStat(data []byte) (procStatFields, error) {
+	var out procStatFields
+
 	s := string(data)
 	open := strings.IndexByte(s, '(')
 	closing := strings.LastIndexByte(s, ')')
 	if open < 0 || closing < open {
-		return "", 0, 0, 0, 0, fmt.Errorf("proc stat: no comm field")
+		return out, fmt.Errorf("proc stat: no comm field")
 	}
-	name = s[open+1 : closing]
+	out.Name = s[open+1 : closing]
 
 	rest := strings.Fields(s[closing+1:])
-	// After comm, the documented layout runs state(3) .. rss(24), so at
-	// least 22 fields are required to reach rss.
+	// After comm the documented layout runs state(3) .. rss(24), so at least
+	// 22 fields are required to reach rss.
 	if len(rest) < 22 {
-		return "", 0, 0, 0, 0, fmt.Errorf("proc stat: %d fields after comm, want at least 22", len(rest))
+		return out, fmt.Errorf("proc stat: %d fields after comm, want at least 22", len(rest))
 	}
 
-	// rest[i] corresponds to field i+3.
+	// rest[i] corresponds to documented field i+3.
 	at := func(i int, what string) (uint64, error) {
 		v, err := atou(rest[i])
 		if err != nil {
@@ -145,19 +185,35 @@ func parseProcStat(data []byte) (name string, utime, stime, majflt, rssPages uin
 		return v, nil
 	}
 
-	if utime, err = at(11, "utime"); err != nil { // field 14
-		return "", 0, 0, 0, 0, err
+	if len(rest[0]) != 1 {
+		return out, fmt.Errorf("proc stat: state %q is not a single byte", rest[0])
 	}
-	if stime, err = at(12, "stime"); err != nil { // field 15
-		return "", 0, 0, 0, 0, err
+	out.State = rest[0][0]
+
+	var err error
+	if out.MajFlt, err = at(9, "majflt"); err != nil { // field 12
+		return out, err
 	}
-	if majflt, err = at(9, "majflt"); err != nil { // field 12
-		return "", 0, 0, 0, 0, err
+	if out.UTime, err = at(11, "utime"); err != nil { // field 14
+		return out, err
 	}
-	if rssPages, err = at(21, "rss"); err != nil { // field 24
-		return "", 0, 0, 0, 0, err
+	if out.STime, err = at(12, "stime"); err != nil { // field 15
+		return out, err
 	}
-	return name, utime, stime, majflt, rssPages, nil
+	if out.NThreads, err = at(17, "num_threads"); err != nil { // field 20
+		return out, err
+	}
+	if out.RSSPages, err = at(21, "rss"); err != nil { // field 24
+		return out, err
+	}
+	// Field 42 is absent on kernels without delay accounting; that is a
+	// missing measurement, not an error.
+	if len(rest) > 39 {
+		if v, err := atou(rest[39]); err == nil {
+			out.BlkIOTicks, out.BlkIOKnown = v, true
+		}
+	}
+	return out, nil
 }
 
 // parseProcIO extracts actual storage I/O. rchar/wchar count every read and

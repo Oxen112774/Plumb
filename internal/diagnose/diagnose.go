@@ -116,19 +116,36 @@ type CPUUsage struct {
 }
 
 // Report is the complete output of one diagnosis.
+//
+// Every field carries an explicit json tag: this struct is the documented
+// interface for anything consuming -json, and Go's default is to emit the Go
+// field name, which would put "Findings" next to "open_files" in the same
+// object.
 type Report struct {
-	StartedAt time.Time
-	Interval  time.Duration
-	System    probe.System
-	CPUUsage  CPUUsage
-	Memory    probe.Memory
-	Pressure  probe.Pressure
-	Findings  []Finding
-	Errors    []string
+	StartedAt time.Time      `json:"started_at"`
+	Interval  time.Duration  `json:"interval_ns"`
+	System    probe.System   `json:"system"`
+	CPUUsage  CPUUsage       `json:"cpu_usage"`
+	Memory    probe.Memory   `json:"memory"`
+	Pressure  probe.Pressure `json:"pressure"`
+	Findings  []Finding      `json:"findings"`
+	Errors    []string       `json:"errors,omitempty"`
+
+	// Cores is per-core utilisation over the window, in the kernel's own core
+	// order. It is carried in the report rather than left to be recomputed
+	// because the machine average cannot express the one thing per-core data
+	// is for: a single saturated core next to idle ones.
+	Cores []probe.CoreLoad `json:"cores,omitempty"`
+
+	// Threads summarises the thread tables as of the later sample, and
+	// OpenFiles lists the files held open by processes that had a thread
+	// blocked. Both are empty in single-sample mode.
+	Threads   probe.ThreadScan          `json:"threads,omitempty"`
+	OpenFiles map[int]probe.OpenFileSet `json:"open_files,omitempty"`
 
 	// SingleSample is true when only one snapshot was available, so anything
 	// requiring a rate — process attribution in particular — is unavailable.
-	SingleSample bool
+	SingleSample bool `json:"single_sample"`
 }
 
 // Worst returns the most severe finding, or a synthetic OK finding when the
@@ -195,8 +212,11 @@ func Analyze(prev, cur probe.Snapshot, opts Options) Report {
 		Interval:     opts.Interval,
 		System:       cur.System,
 		CPUUsage:     a.cpu,
+		Cores:        cur.CoreLoads(prev),
 		Memory:       cur.Memory,
 		Pressure:     cur.Pressure,
+		Threads:      cur.Threads,
+		OpenFiles:    cur.OpenFiles,
 		Errors:       cur.Errors,
 		SingleSample: !a.hasPrev,
 	}
@@ -218,8 +238,10 @@ type analysis struct {
 func (a *analysis) run() []Finding {
 	rules := []func() *Finding{
 		a.ruleIOPressure,
+		a.ruleBlockedThreads,
 		a.ruleMemoryPressure,
 		a.ruleCPUPressure,
+		a.ruleCoreSkew,
 		a.ruleSteal,
 		a.ruleSwap,
 		a.ruleDiskSpace,
@@ -376,7 +398,7 @@ func (a *analysis) TopCPU(n int) []Culprit {
 			User:    d.proc.User,
 			Cmdline: d.proc.Cmdline,
 			Note: fmt.Sprintf("占用 %s 核",
-				trimFloat(PercentOfCore(d.ticks, a.interval))),
+				trimFloat(CoresUsed(d.ticks, a.interval))),
 		})
 		if len(out) >= n {
 			break
@@ -433,4 +455,10 @@ func PercentOfCore(ticks uint64, interval time.Duration) float64 {
 		return 0
 	}
 	return float64(ticks) / interval.Seconds()
+}
+
+// CoresUsed converts a tick delta into how many cores' worth of CPU time it
+// represents: 100 ticks in one second is one whole core.
+func CoresUsed(ticks uint64, interval time.Duration) float64 {
+	return PercentOfCore(ticks, interval) / 100
 }

@@ -24,7 +24,7 @@ import (
 	"github.com/Oxen112774/plumb/internal/report"
 )
 
-const version = "0.1.0"
+const version = "0.2.0"
 
 func main() {
 	if err := run(os.Args[1:]); err != nil {
@@ -49,6 +49,8 @@ func run(args []string) error {
 			"文件系统根；指向 fixture 目录即可在非 Linux 上运行")
 		prevRoot = fs.String("prev-root", "",
 			"上一次采样的根目录；用于复现演示，给出后跳过等待")
+		openFiles = fs.Int("files", 6,
+			"每个被堵住的进程最多列出几个它打开的文件；设为 0 表示不限")
 	)
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -80,6 +82,12 @@ func run(args []string) error {
 		}
 	}
 	cur := probe.Take(rootFS, *mount)
+
+	// The thread tables are read for the later sample only. "What is stuck
+	// right now" is a question about an instant, not a rate, and walking every
+	// thread table is the most expensive thing this tool does — there is no
+	// reason to pay for it twice.
+	probe.AttachThreadScan(rootFS, &cur, *openFiles)
 
 	rep := diagnose.Analyze(prev, cur, diagnose.Options{Interval: *interval, Top: *top})
 

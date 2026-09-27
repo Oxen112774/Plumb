@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/Oxen112774/plumb/internal/diagnose"
+	"github.com/Oxen112774/plumb/internal/probe"
 )
 
 const (
@@ -105,7 +106,9 @@ func Text(w io.Writer, r diagnose.Report, color bool) error {
 					name = fmt.Sprintf("%-18s %s", name, "["+c.User+"]")
 				}
 				b.WriteString(fmt.Sprintf("        PID %-7d %s\n", c.PID, name))
-				b.WriteString(fmt.Sprintf("        %-12s %s\n", "", c.Note))
+				for _, line := range noteLines(c.Note) {
+					b.WriteString(fmt.Sprintf("        %-12s %s\n", "", line))
+				}
 				if c.Cmdline != "" && c.Cmdline != c.Name {
 					b.WriteString(fmt.Sprintf("        %-12s %s\n", "",
 						paint(c.Cmdline, ansiDim, color)))
@@ -153,6 +156,57 @@ func Text(w io.Writer, r diagnose.Report, color bool) error {
 	return err
 }
 
+// noteLines breaks a culprit note into display lines. A note uses explicit
+// newlines to separate independent facts — one per blocked thread, then the
+// files it holds — and each of those is then wrapped to the width left over by
+// the note's hanging indent.
+func noteLines(note string) []string {
+	var out []string
+	for _, line := range strings.Split(note, "\n") {
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+		out = append(out, wrap(line, 54)...)
+	}
+	return out
+}
+
+// coreLine summarises per-core utilisation.
+//
+// On a small machine every core is listed, because seeing one at 99% next to
+// three at 20% is exactly the point. On a large one only the loaded cores are,
+// since sixty-four numbers is not a summary.
+func coreLine(cores []probe.CoreLoad) string {
+	const smallMachine = 8
+
+	parts := make([]string, 0, len(cores))
+	if len(cores) <= smallMachine {
+		for _, c := range cores {
+			parts = append(parts, fmt.Sprintf("CPU%d %.0f%%", c.ID, c.Busy))
+		}
+		return strings.Join(parts, "  ")
+	}
+
+	hot := 0
+	for _, c := range cores {
+		if c.Busy < 80 {
+			continue
+		}
+		hot++
+		if len(parts) < 4 {
+			parts = append(parts, fmt.Sprintf("CPU%d %.0f%%", c.ID, c.Busy))
+		}
+	}
+	if hot == 0 {
+		return fmt.Sprintf("%d 核，没有核心超过 80%%", len(cores))
+	}
+	s := strings.Join(parts, "  ")
+	if hot > len(parts) {
+		s += fmt.Sprintf("，另有 %d 个核心超过 80%%", hot-len(parts))
+	}
+	return s
+}
+
 func overviewLines(r diagnose.Report) []string {
 	var out []string
 
@@ -161,6 +215,10 @@ func overviewLines(r diagnose.Report) []string {
 			"CPU      繁忙 %.1f%%   用户 %.1f%%   系统 %.1f%%   等磁盘 %.1f%%   被抢占 %.1f%%",
 			r.CPUUsage.Busy, r.CPUUsage.User, r.CPUUsage.System,
 			r.CPUUsage.IOWait, r.CPUUsage.Steal))
+	}
+
+	if len(r.Cores) > 0 {
+		out = append(out, "核心     "+coreLine(r.Cores))
 	}
 
 	if r.Memory.TotalKB > 0 {
@@ -179,6 +237,16 @@ func overviewLines(r diagnose.Report) []string {
 			r.System.Load[0], r.System.Cores, r.System.LoadPerCore()))
 	}
 
+	if r.Threads.Total > 0 {
+		line := fmt.Sprintf("线程     共 %d 个", r.Threads.Total)
+		if r.Threads.Blocked > 0 {
+			line += fmt.Sprintf("，其中 %d 个处于 D 状态（不可中断，kill 不掉）", r.Threads.Blocked)
+		} else {
+			line += "，没有被卡住的"
+		}
+		out = append(out, line)
+	}
+
 	if r.Pressure.Supported {
 		out = append(out, fmt.Sprintf("压力     cpu some %.2f%%   io full %.2f%%   memory full %.2f%%",
 			r.Pressure.CPU.Some.Avg10,
@@ -190,24 +258,32 @@ func overviewLines(r diagnose.Report) []string {
 }
 
 // wrap breaks s into lines of at most width display columns, counting East
-// Asian wide runes as two columns and preferring to break at a space.
+// Asian wide runes as two columns and preferring to break where a line may
+// legally end.
 //
 // Counting runes instead of columns would let a Chinese headline overflow the
 // terminal, since each ideograph occupies two cells. Breaking wherever the
-// limit lands turns English advice text into noise, so a break at the last
-// space wins when one is available.
+// limit happens to land turns English advice into noise ("fs" / "ync") and
+// splits file paths mid-component ("/var/lib/mysql/i" / "bdata1"), so a break
+// at the last legal point wins when one exists. An explicit newline is always
+// a hard break.
 func wrap(s string, width int) []string {
 	if s == "" {
 		return nil
 	}
 	var (
-		lines     []string
-		cur       []rune
-		col       int
-		lastSpace = -1
+		lines = []string(nil)
+		cur   []rune
+		col   int
 	)
 
 	for _, r := range s {
+		if r == '\n' {
+			lines = append(lines, string(cur))
+			cur = cur[:0]
+			col = 0
+			continue
+		}
 		w := runeWidth(r)
 		if col+w > width && len(cur) > 0 {
 			// A closing punctuation mark may not open a line (行首禁则).
@@ -217,18 +293,15 @@ func wrap(s string, width int) []string {
 				col += w
 				continue
 			}
-			if lastSpace > 0 {
-				lines = append(lines, string(cur[:lastSpace]))
-				cur = append([]rune(nil), cur[lastSpace+1:]...)
+			lineEnd, restStart := breakPoint(cur, width)
+			if lineEnd > 0 {
+				lines = append(lines, string(cur[:lineEnd]))
+				cur = append([]rune(nil), cur[restStart:]...)
 			} else {
 				lines = append(lines, string(cur))
 				cur = cur[:0]
 			}
 			col = displayWidth(cur)
-			lastSpace = lastSpaceIndex(cur)
-		}
-		if r == ' ' {
-			lastSpace = len(cur)
 		}
 		cur = append(cur, r)
 		col += w
@@ -237,6 +310,64 @@ func wrap(s string, width int) []string {
 		lines = append(lines, string(cur))
 	}
 	return lines
+}
+
+// breakPoint reports where to end the current line and where the next one
+// begins, or (0, 0) when the line has to be cut at the column limit.
+//
+// A separator — a space, CJK punctuation, the path separator — is the best
+// break available: it keeps English words and file paths whole. One is only
+// worth taking from the second half of the budget onwards, though, because a
+// separator near the start would leave most of the line empty. The comparison
+// is in display columns, not runes: in a Chinese line the two differ by a
+// factor of two, and a rune index would let a separator at the very start of
+// the line count as being halfway across it.
+//
+// Failing that, a break between two ideographs is legal in Chinese, and taking
+// it beats leaving a third of every other line blank. Latin text has no such
+// freedom, so a word with no separator near it is cut at the limit.
+//
+// Neither rule may place a break where the script forbids one: not before a
+// character that cannot start a line, not after one that cannot end it (行首、
+// 行尾禁则), and never in a way that strands a space at either edge.
+func breakPoint(rs []rune, width int) (lineEnd, restStart int) {
+	if i := lastSeparator(rs); i > 0 && displayWidth(rs[:i]) >= width/2 {
+		if rs[i] == ' ' {
+			return i, i + 1 // a space is consumed by the break
+		}
+		return i + 1, i + 1 // a separator ends the line it closes
+	}
+
+	for i := len(rs); i > 0; i-- {
+		if noLineEnd(rs[i-1]) {
+			continue
+		}
+		if i < len(rs) {
+			if rs[i] == ' ' {
+				return i, i + 1 // a space must not open the next line either
+			}
+			if noLineStart(rs[i]) {
+				continue
+			}
+		}
+		if runeWidth(rs[i-1]) == 2 {
+			// There is an ideograph on the left of the break and no
+			// forbidden character on the right, so it is legal here.
+			return i, i
+		}
+	}
+	return 0, 0
+}
+
+// lastSeparator returns the index of the last preferred break character in rs,
+// or -1 when it holds none.
+func lastSeparator(rs []rune) int {
+	for i := len(rs) - 1; i > 0; i-- {
+		if rs[i] == ' ' || strings.ContainsRune("、，；：/", rs[i]) {
+			return i
+		}
+	}
+	return -1
 }
 
 // noLineStart reports whether r is a character that Chinese typography forbids
@@ -250,21 +381,22 @@ func noLineStart(r rune) bool {
 	return false
 }
 
+// noLineEnd reports whether r is a character that Chinese typography forbids at
+// the end of a line: an opening bracket or quote with nothing after it yet.
+func noLineEnd(r rune) bool {
+	switch r {
+	case '（', '《', '「', '『', '【', '〔', '｛', '［', '〈', '“', '‘':
+		return true
+	}
+	return false
+}
+
 func displayWidth(rs []rune) int {
 	n := 0
 	for _, r := range rs {
 		n += runeWidth(r)
 	}
 	return n
-}
-
-func lastSpaceIndex(rs []rune) int {
-	for i := len(rs) - 1; i >= 0; i-- {
-		if rs[i] == ' ' {
-			return i
-		}
-	}
-	return -1
 }
 
 // runeWidth returns the display width of a rune: 2 for CJK and fullwidth

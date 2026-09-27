@@ -23,13 +23,13 @@ func psi(some, full float64) probe.Pressure {
 			Some: probe.PSIValues{Avg10: some}, HasSome: true,
 		},
 		IO: probe.PSIStall{
-			Some: probe.PSIValues{Avg10: some},
-			Full: probe.PSIValues{Avg10: full},
+			Some:    probe.PSIValues{Avg10: some},
+			Full:    probe.PSIValues{Avg10: full},
 			HasSome: true, HasFull: true,
 		},
 		Memory: probe.PSIStall{
-			Some: probe.PSIValues{Avg10: some},
-			Full: probe.PSIValues{Avg10: full},
+			Some:    probe.PSIValues{Avg10: some},
+			Full:    probe.PSIValues{Avg10: full},
 			HasSome: true, HasFull: true,
 		},
 	}

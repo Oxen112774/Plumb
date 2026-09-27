@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/Oxen112774/plumb/internal/diagnose"
+	"github.com/Oxen112774/plumb/internal/probe"
 )
 
 // Each ideograph occupies two terminal cells, so a rune count would let a
@@ -60,6 +61,73 @@ func TestWrapDoesNotOrphanClosingPunctuation(t *testing.T) {
 	}
 	if got[0] != "中文中文。" {
 		t.Fatalf("wrap = %q, want %q", got, "中文中文。")
+	}
+}
+
+// An opening bracket may not end a line either: whatever it opens belongs on
+// the same line as it.
+func TestWrapDoesNotOrphanOpeningBracket(t *testing.T) {
+	got := wrap("中文中文中文中文中（后面的内容很长很长很长很长很长很长", 20)
+	for i, line := range got[:len(got)-1] {
+		if strings.HasSuffix(line, "（") {
+			t.Errorf("line %d = %q ends with an opening bracket", i, line)
+		}
+	}
+}
+
+// Chinese text may break between any two ideographs. Falling back to the column
+// limit keeps a Chinese paragraph from leaving a third of every other line
+// empty, which is what happens when only separators count as break points.
+func TestWrapFillsChineseLinesToTheColumnBudget(t *testing.T) {
+	got := wrap("这是一个很长的中文句子用来测试换行行为是否填满整行", 20)
+	if len(got) < 3 {
+		t.Fatalf("wrap = %q, want several lines", got)
+	}
+	for i, line := range got[:len(got)-1] {
+		if w := displayWidth([]rune(line)); w != 20 {
+			t.Errorf("line %d = %q is %d columns wide, want a full 20", i, line, w)
+		}
+	}
+}
+
+// The flip side: a separator so early in the budget that honouring it would
+// leave the line mostly empty is not worth taking.
+func TestWrapDoesNotStopAtAnEarlySeparator(t *testing.T) {
+	got := wrap("短、这是一个很长的中文句子用来测试换行是否填满整行整行", 20)
+	if len(got) < 2 {
+		t.Fatalf("wrap = %q, want several lines", got)
+	}
+	if w := displayWidth([]rune(got[0])); w < 10 {
+		t.Errorf("first line = %q is only %d columns wide; an early separator "+
+			"should not cut the line short", got[0], w)
+	}
+}
+
+// A separator's position has to be measured in columns. In a Chinese line the
+// rune index and the column position differ by a factor of two, so comparing a
+// rune index against a column budget makes a separator at the very start of the
+// line look like it is halfway across it.
+func TestWrapMeasuresSeparatorsInColumns(t *testing.T) {
+	// The only separator is at rune 1 — column 2 — nowhere near the halfway
+	// point of a 20-column line, so it must not be honoured.
+	got := wrap("短、这是一个很长很长的中文句子需要换行很多次才够", 20)
+	if len(got) < 2 {
+		t.Fatalf("wrap = %q, want several lines", got)
+	}
+	if w := displayWidth([]rune(got[0])); w < 16 {
+		t.Errorf("first line = %q is %d columns wide, want close to the full 20",
+			got[0], w)
+	}
+}
+
+// A space stranded at either edge of a line is a visible defect, and it is what
+// a naive break does when the budget runs out next to one.
+func TestWrapNeverStrandsASpaceAtALineEdge(t *testing.T) {
+	got := wrap("说明瓶颈是一个线程干完全部活不是 CPU 不够导致的响应变慢", 20)
+	for _, line := range got {
+		if strings.HasPrefix(line, " ") || strings.HasSuffix(line, " ") {
+			t.Errorf("line %q has a space at its edge", line)
+		}
 	}
 }
 
@@ -142,5 +210,44 @@ func TestJSONRoundTrips(t *testing.T) {
 	}
 	if len(back.Findings) != 1 || back.Findings[0].Area != "磁盘 IO" {
 		t.Fatalf("round trip lost data: %+v", back)
+	}
+}
+
+// The JSON output is the documented interface for anything consuming -json, so
+// its key style has to be uniform. Go's default is to emit the Go field name,
+// which put "Findings" next to "open_files" in the same object.
+func TestJSONKeysAreUniformlySnakeCase(t *testing.T) {
+	rep := diagnose.Report{
+		StartedAt:    time.Now(),
+		Interval:     time.Second,
+		CPUUsage:     diagnose.CPUUsage{Busy: 42.5},
+		Cores:        []probe.CoreLoad{{ID: 0, Busy: 99}},
+		Threads:      probe.ThreadScan{Total: 1},
+		OpenFiles:    map[int]probe.OpenFileSet{1: {Paths: []string{"/x"}}},
+		SingleSample: true,
+		Findings:     []diagnose.Finding{{Area: "磁盘 IO"}},
+	}
+
+	var b strings.Builder
+	if err := JSON(&b, rep); err != nil {
+		t.Fatalf("JSON: %v", err)
+	}
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(b.String()), &raw); err != nil {
+		t.Fatalf("output is not valid JSON: %v", err)
+	}
+
+	for _, want := range []string{
+		"started_at", "interval_ns", "cpu_usage", "cores",
+		"threads", "open_files", "single_sample", "findings",
+	} {
+		if _, ok := raw[want]; !ok {
+			t.Errorf("JSON is missing key %q", want)
+		}
+	}
+	for k := range raw {
+		if first := k[:1]; first == strings.ToUpper(first) {
+			t.Errorf("key %q is not snake_case", k)
+		}
 	}
 }

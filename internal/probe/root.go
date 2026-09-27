@@ -64,6 +64,35 @@ func (r Root) Exists(rel string) bool {
 // ReadDir lists a /proc-relative directory.
 func (r Root) ReadDir(rel string) ([]os.DirEntry, error) { return os.ReadDir(r.Path(rel)) }
 
+// ReadLink resolves a /proc-relative symlink.
+//
+// /proc/<pid>/fd/<n> is a symlink whose target names the open file, which is
+// the only way to learn *which* file a process is working on — there is no
+// other interface to it.
+//
+// A fixture tree cannot always hold real symlinks: creating one on Windows
+// requires a privilege an unprivileged process does not have. The fixture
+// format therefore stores a link target as the content of a regular file, and
+// this falls back to reading it. The fallback cannot hide a real failure —
+// under a live /proc these paths are always symlinks, so a failed readlink
+// means the descriptor is gone or the read was denied, and the file read then
+// fails the same way.
+func (r Root) ReadLink(rel string) (string, error) {
+	target, err := os.Readlink(r.Path(rel))
+	if err == nil {
+		return target, nil
+	}
+	data, ferr := os.ReadFile(r.Path(rel))
+	if ferr != nil {
+		return "", err // report the readlink error; it is the informative one
+	}
+	s := strings.TrimSpace(string(data))
+	if s == "" {
+		return "", err
+	}
+	return s, nil
+}
+
 // lines iterates over data line by line. A callback returning errStop ends
 // iteration cleanly.
 func lines(data []byte, fn func(string) error) error {
