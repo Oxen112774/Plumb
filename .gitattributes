@@ -1,0 +1,3 @@
+# The tool runs on Linux; keep the working tree LF everywhere so a clone on a
+# Linux host and one on Windows are byte-identical.
+* text=auto eol=lf
