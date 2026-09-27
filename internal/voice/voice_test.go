@@ -32,11 +32,13 @@ func sampleReport() diagnose.Report {
 func TestComposeLeadsWithTheWorstFinding(t *testing.T) {
 	m := Compose(sampleReport())
 
-	if !strings.Contains(m.Situation, "磁盘") {
-		t.Errorf("situation = %q, want the disk script", m.Situation)
+	// What matters is that the right script was selected; asserting on its
+	// wording would make every tone edit a test edit.
+	if want := scripts["磁盘 IO"]; m.Situation != want.situation || m.First != want.first {
+		t.Errorf("situation/first = %q / %q, want the 磁盘 IO script", m.Situation, m.First)
 	}
-	if m.First == "" {
-		t.Error("no first step for the worst finding")
+	if m.Severity != diagnose.SeverityCritical {
+		t.Errorf("severity = %v, want 严重", m.Severity)
 	}
 	if got, want := m.Facts[0], sampleReport().Findings[0].Headline; got != want {
 		t.Errorf("first fact = %q, want the headline verbatim (%q)", got, want)
@@ -60,7 +62,7 @@ func TestComposeHealthysaysNothingAboutUrgency(t *testing.T) {
 	if m.First != "" {
 		t.Errorf("first = %q, want no instruction on a healthy machine", m.First)
 	}
-	if !strings.Contains(m.Situation, "没什么") {
+	if !strings.Contains(m.Situation, "没事") {
 		t.Errorf("situation = %q, want a plain all-clear", m.Situation)
 	}
 }
@@ -73,18 +75,84 @@ func TestMessageNeverClaimsAnAction(t *testing.T) {
 		"无需担心", "已为你", "帮你重启", "已自动",
 	}
 
-	var out strings.Builder
-	if err := Write(&out, sampleReport(), false, nil); err != nil {
+	healthy := sampleReport()
+	healthy.Findings = nil
+
+	for name, r := range map[string]diagnose.Report{
+		"problems": sampleReport(),
+		"healthy":  healthy,
+	} {
+		var out strings.Builder
+		if err := Write(&out, r, false, nil); err != nil {
+			t.Fatalf("%s: Write: %v", name, err)
+		}
+		text := out.String()
+
+		if !strings.Contains(text, "没动你的系统") {
+			t.Errorf("%s: the message does not say what plumb did, which is nothing", name)
+		}
+		for _, bad := range forbidden {
+			if strings.Contains(text, bad) {
+				t.Errorf("%s: the message claims %q, which plumb never does", name, bad)
+			}
+		}
+	}
+}
+
+// Severity goes in the header, before any prose: it is the answer to the only
+// question the reader has, and making them read a paragraph to reach it would be
+// a strange way to respect their time.
+func TestHeaderCarriesTheSeverity(t *testing.T) {
+	var b strings.Builder
+	if err := Write(&b, sampleReport(), false, nil); err != nil {
 		t.Fatalf("Write: %v", err)
 	}
-	text := out.String()
+	header := strings.SplitN(b.String(), "\n", 2)[0]
 
-	if !strings.Contains(text, "我没有动你的系统") {
-		t.Error("the message does not say what plumb did, which is nothing")
+	for _, want := range []string{"plumb", "prod-db-01", "严重"} {
+		if !strings.Contains(header, want) {
+			t.Errorf("header = %q, want it to carry %q", header, want)
+		}
 	}
-	for _, bad := range forbidden {
-		if strings.Contains(text, bad) {
-			t.Errorf("the message claims %q, which plumb never does", bad)
+
+	r := sampleReport()
+	r.Findings = nil
+	b.Reset()
+	if err := Write(&b, r, false, nil); err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+	if header := strings.SplitN(b.String(), "\n", 2)[0]; !strings.Contains(header, "正常") {
+		t.Errorf("header = %q, want 正常 on a healthy machine", header)
+	}
+}
+
+// Length is part of the contract, not a style choice. At 2am a long paragraph is
+// a paragraph nobody finishes, so a message that grows past the budget is a
+// regression even if every sentence in it is true.
+func TestMessageStaysShort(t *testing.T) {
+	lines := func(r diagnose.Report) []string {
+		var b strings.Builder
+		if err := Write(&b, r, false, nil); err != nil {
+			t.Fatalf("Write: %v", err)
+		}
+		return strings.Split(strings.TrimRight(b.String(), "\n"), "\n")
+	}
+
+	healthy := sampleReport()
+	healthy.Findings = nil
+
+	for _, tc := range []struct {
+		name string
+		r    diagnose.Report
+		max  int
+	}{
+		{"three findings", sampleReport(), 12},
+		{"healthy", healthy, 5},
+	} {
+		got := lines(tc.r)
+		if len(got) > tc.max {
+			t.Errorf("%s: %d lines, budget %d:\n%s",
+				tc.name, len(got), tc.max, strings.Join(got, "\n"))
 		}
 	}
 }
@@ -99,7 +167,7 @@ func TestSplitNoteSeparatesHeldFiles(t *testing.T) {
 	if !strings.HasPrefix(detail, "线程 1240：") {
 		t.Errorf("detail = %q, want the first thread", detail)
 	}
-	if !strings.Contains(detail, "另外 1 个也在等") {
+	if !strings.Contains(detail, "另有 1 个也在等") {
 		t.Errorf("detail = %q, want the remaining thread counted", detail)
 	}
 	if strings.Contains(detail, "持有文件") {

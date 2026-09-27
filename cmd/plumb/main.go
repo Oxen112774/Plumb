@@ -18,8 +18,10 @@
 package main
 
 import (
+	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"os"
 	"time"
 
@@ -31,9 +33,15 @@ import (
 
 const version = "0.3.0"
 
+// errUsage means the flag package has already printed both the error and the
+// usage text, so main must not add a line of its own on top of it.
+var errUsage = errors.New("usage")
+
 func main() {
-	if err := run(os.Args[1:]); err != nil {
-		fmt.Fprintln(os.Stderr, "plumb: "+err.Error())
+	if err := run(os.Args[1:], os.Stderr); err != nil {
+		if !errors.Is(err, errUsage) {
+			fmt.Fprintln(os.Stderr, "plumb: "+err.Error())
+		}
 		os.Exit(1)
 	}
 }
@@ -49,8 +57,16 @@ type settings struct {
 	model     *voice.Model
 }
 
-func run(args []string) error {
-	fs := flag.NewFlagSet("plumb", flag.ExitOnError)
+// run is the whole program minus the exit codes. usage is where the flag package
+// writes its parser errors, which is the caller's stderr in real use and
+// io.Discard in tests.
+func run(args []string, usage io.Writer) error {
+	// ContinueOnError rather than ExitOnError: with ExitOnError the flag package
+	// exits with status 2, which is exactly what -assert uses to mean "this
+	// machine has a problem". A mistyped flag would then be indistinguishable
+	// from a real alert — the one confusion a monitoring tool must not ship.
+	fs := flag.NewFlagSet("plumb", flag.ContinueOnError)
+	fs.SetOutput(usage)
 	var (
 		interval = fs.Duration("d", time.Second,
 			"两次采样之间的间隔，用于把累计计数器换算成速率；设为 0 则只采样一次")
@@ -79,7 +95,10 @@ func run(args []string) error {
 			"用模型补一段综合判断；需要环境变量 PLUMB_AI_URL 与 PLUMB_AI_MODEL")
 	)
 	if err := fs.Parse(args); err != nil {
-		return err
+		if errors.Is(err, flag.ErrHelp) {
+			return nil // -h: the usage text was the answer, and it is a success
+		}
+		return errUsage
 	}
 
 	if *showVersion {

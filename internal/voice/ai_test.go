@@ -153,7 +153,7 @@ func TestWriteIncludesAGroundedModelParagraph(t *testing.T) {
 	}
 	out := b.String()
 
-	if !strings.Contains(out, "由模型读完整份报告后写成") {
+	if !strings.Contains(out, "〔模型综合〕") {
 		t.Error("a model-written paragraph must say that it is one")
 	}
 	if !strings.Contains(out, "磁盘这边堵住了，主要是 PID 1234 在写。") {
