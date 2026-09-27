@@ -1,0 +1,8 @@
+Name:	nginx
+State:	S (sleeping)
+Tgid:	2048
+Pid:	2048
+PPid:	1
+Uid:	33	33	33	33
+Gid:	33	33	33	33
+Threads:	8

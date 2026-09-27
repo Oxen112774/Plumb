@@ -1,0 +1,252 @@
+package probe
+
+import (
+	"fmt"
+	"strconv"
+	"strings"
+)
+
+// Process is one task's cumulative counters, from /proc/<pid>.
+type Process struct {
+	PID    int    `json:"pid"`
+	Name   string `json:"name"`
+	User   string `json:"user,omitempty"`
+	UID    int    `json:"uid"`
+
+	// Cmdline is the full argument vector, space-joined and length-capped.
+	// Without it a culprit reads as "java" or "python3", which tells an
+	// operator nothing about which of their services it is.
+	Cmdline string `json:"cmdline,omitempty"`
+
+	UTime    uint64 `json:"utime"`
+	STime    uint64 `json:"stime"`
+	MajFlt   uint64 `json:"majflt"`
+	RSSPages uint64 `json:"rss_pages"`
+
+	ReadBytes  uint64 `json:"read_bytes"`
+	WriteBytes uint64 `json:"write_bytes"`
+
+	// IOKnown is false when /proc/<pid>/io could not be read. On a default
+	// kernel that file requires PTRACE_MODE_READ, so an unprivileged run
+	// sees it only for its own processes. Without this flag an unreadable
+	// counter is indistinguishable from a process doing no I/O.
+	IOKnown bool `json:"io_known"`
+}
+
+// CPUTicks is total CPU time charged to this process, in USER_HZ ticks.
+func (p Process) CPUTicks() uint64 { return p.UTime + p.STime }
+
+// IOBytes is total bytes this process moved to and from storage.
+func (p Process) IOBytes() uint64 { return p.ReadBytes + p.WriteBytes }
+
+const cmdlineCap = 160
+
+// ListPIDs enumerates the numeric entries in /proc.
+func ListPIDs(r Root) ([]int, error) {
+	entries, err := r.ReadDir("proc")
+	if err != nil {
+		return nil, fmt.Errorf("read proc: %w", err)
+	}
+	pids := make([]int, 0, len(entries))
+	for _, e := range entries {
+		pid, err := strconv.Atoi(e.Name())
+		if err != nil || pid <= 0 {
+			continue
+		}
+		pids = append(pids, pid)
+	}
+	return pids, nil
+}
+
+// ReadProcesses reads the counters for each pid. A process that exits
+// mid-scan is skipped rather than failing the whole sweep — on a busy machine
+// that races constantly and is not an error.
+func ReadProcesses(r Root, pids []int, users map[int]string) []Process {
+	out := make([]Process, 0, len(pids))
+	for _, pid := range pids {
+		p, err := readProcess(r, pid)
+		if err != nil {
+			continue
+		}
+		if u, ok := users[p.UID]; ok {
+			p.User = u
+		} else {
+			p.User = strconv.Itoa(p.UID)
+		}
+		out = append(out, p)
+	}
+	return out
+}
+
+func readProcess(r Root, pid int) (Process, error) {
+	dir := "proc/" + strconv.Itoa(pid)
+
+	statData, err := r.ReadFile(dir + "/stat")
+	if err != nil {
+		return Process{}, err
+	}
+	name, utime, stime, majflt, rss, err := parseProcStat(statData)
+	if err != nil {
+		return Process{}, err
+	}
+
+	p := Process{
+		PID:      pid,
+		Name:     name,
+		UTime:    utime,
+		STime:    stime,
+		MajFlt:   majflt,
+		RSSPages: rss,
+	}
+
+	if data, err := r.ReadFile(dir + "/io"); err == nil {
+		if rb, wb, err := parseProcIO(data); err == nil {
+			p.ReadBytes, p.WriteBytes, p.IOKnown = rb, wb, true
+		}
+	}
+	if data, err := r.ReadFile(dir + "/status"); err == nil {
+		p.UID = parseStatusUID(data)
+	}
+	if data, err := r.ReadFile(dir + "/cmdline"); err == nil {
+		p.Cmdline = parseCmdline(data)
+	}
+	return p, nil
+}
+
+// parseProcStat extracts the fields we need from /proc/<pid>/stat.
+//
+// The comm field (field 2) is wrapped in parentheses and may itself contain
+// spaces and parentheses — a process can name itself "foo) bar". Splitting
+// the whole line on whitespace is therefore wrong, and is the single most
+// common bug in readers of this file. The fields after comm are parsed
+// relative to the last ')' instead.
+func parseProcStat(data []byte) (name string, utime, stime, majflt, rssPages uint64, err error) {
+	s := string(data)
+	open := strings.IndexByte(s, '(')
+	closing := strings.LastIndexByte(s, ')')
+	if open < 0 || closing < open {
+		return "", 0, 0, 0, 0, fmt.Errorf("proc stat: no comm field")
+	}
+	name = s[open+1 : closing]
+
+	rest := strings.Fields(s[closing+1:])
+	// After comm, the documented layout runs state(3) .. rss(24), so at
+	// least 22 fields are required to reach rss.
+	if len(rest) < 22 {
+		return "", 0, 0, 0, 0, fmt.Errorf("proc stat: %d fields after comm, want at least 22", len(rest))
+	}
+
+	// rest[i] corresponds to field i+3.
+	at := func(i int, what string) (uint64, error) {
+		v, err := atou(rest[i])
+		if err != nil {
+			return 0, fmt.Errorf("proc stat %s (%q): %w", what, rest[i], err)
+		}
+		return v, nil
+	}
+
+	if utime, err = at(11, "utime"); err != nil { // field 14
+		return "", 0, 0, 0, 0, err
+	}
+	if stime, err = at(12, "stime"); err != nil { // field 15
+		return "", 0, 0, 0, 0, err
+	}
+	if majflt, err = at(9, "majflt"); err != nil { // field 12
+		return "", 0, 0, 0, 0, err
+	}
+	if rssPages, err = at(21, "rss"); err != nil { // field 24
+		return "", 0, 0, 0, 0, err
+	}
+	return name, utime, stime, majflt, rssPages, nil
+}
+
+// parseProcIO extracts actual storage I/O. rchar/wchar count every read and
+// write including cache hits, so they overstate disk pressure; read_bytes and
+// write_bytes are what reached the block layer, which is what a saturated
+// disk cares about.
+func parseProcIO(data []byte) (readBytes, writeBytes uint64, err error) {
+	var got bool
+	err = lines(data, func(line string) error {
+		key, val, ok := strings.Cut(line, ":")
+		if !ok {
+			return nil
+		}
+		n, err := atou(val)
+		if err != nil {
+			return fmt.Errorf("proc io %s: %w", key, err)
+		}
+		switch key {
+		case "read_bytes":
+			readBytes = n
+			got = true
+		case "write_bytes":
+			writeBytes = n
+			got = true
+		}
+		return nil
+	})
+	if err != nil {
+		return 0, 0, err
+	}
+	if !got {
+		return 0, 0, fmt.Errorf("proc io: no read_bytes or write_bytes")
+	}
+	return readBytes, writeBytes, nil
+}
+
+// parseStatusUID returns the real UID from /proc/<pid>/status.
+func parseStatusUID(data []byte) int {
+	uid := -1
+	_ = lines(data, func(line string) error {
+		rest, ok := strings.CutPrefix(line, "Uid:")
+		if !ok {
+			return nil
+		}
+		fields := strings.Fields(rest)
+		if len(fields) == 0 {
+			return nil
+		}
+		if v, err := strconv.Atoi(fields[0]); err == nil {
+			uid = v
+		}
+		return errStop
+	})
+	return uid
+}
+
+// parseCmdline joins the NUL-separated argv and caps its length.
+func parseCmdline(data []byte) string {
+	s := strings.TrimRight(string(data), "\x00")
+	if s == "" {
+		return ""
+	}
+	s = strings.ReplaceAll(s, "\x00", " ")
+	s = strings.Join(strings.Fields(s), " ")
+	if len(s) > cmdlineCap {
+		s = s[:cmdlineCap] + "..."
+	}
+	return s
+}
+
+// ReadUsers parses /etc/passwd into a uid -> name map so findings can name
+// the account that owns a culprit process.
+func ReadUsers(r Root) map[int]string {
+	data, err := r.ReadFile("etc/passwd")
+	if err != nil {
+		return nil
+	}
+	users := make(map[int]string, 32)
+	_ = lines(data, func(line string) error {
+		fields := strings.Split(line, ":")
+		if len(fields) < 3 {
+			return nil
+		}
+		uid, err := strconv.Atoi(fields[2])
+		if err != nil {
+			return nil
+		}
+		users[uid] = fields[0]
+		return nil
+	})
+	return users
+}

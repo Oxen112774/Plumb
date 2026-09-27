@@ -1,0 +1,8 @@
+# Build output
+/plumb
+/plumb.exe
+dist/
+
+# Go workspace files
+go.work
+go.work.sum
