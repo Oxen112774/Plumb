@@ -94,7 +94,7 @@ func Text(w io.Writer, r diagnose.Report, color bool) error {
 		b.WriteString("\n")
 
 		// headline, wrapped to keep the report readable in a narrow window
-		for _, line := range wrap(f.Headline, 66) {
+		for _, line := range Wrap(f.Headline, 66) {
 			b.WriteString("      " + line + "\n")
 		}
 
@@ -125,7 +125,7 @@ func Text(w io.Writer, r diagnose.Report, color bool) error {
 
 		if f.Advice != "" {
 			b.WriteString("\n      " + paint("怎么办", ansiDim, color) + "\n")
-			for _, line := range wrap(f.Advice, 66) {
+			for _, line := range Wrap(f.Advice, 66) {
 				b.WriteString("        " + line + "\n")
 			}
 		}
@@ -145,7 +145,7 @@ func Text(w io.Writer, r diagnose.Report, color bool) error {
 		b.WriteString(paint("未能测到（这些项不参与判定）", ansiBold, color))
 		b.WriteString("\n")
 		for _, e := range r.Errors {
-			for _, line := range wrap("· "+e, 66) {
+			for _, line := range Wrap("· "+e, 66) {
 				b.WriteString("  " + line + "\n")
 			}
 		}
@@ -166,7 +166,7 @@ func noteLines(note string) []string {
 		if strings.TrimSpace(line) == "" {
 			continue
 		}
-		out = append(out, wrap(line, 54)...)
+		out = append(out, Wrap(line, 54)...)
 	}
 	return out
 }
@@ -257,9 +257,13 @@ func overviewLines(r diagnose.Report) []string {
 	return out
 }
 
-// wrap breaks s into lines of at most width display columns, counting East
+// Wrap breaks s into lines of at most width display columns, counting East
 // Asian wide runes as two columns and preferring to break where a line may
 // legally end.
+//
+// It is exported because the human-facing message (package voice) wraps the
+// same way: a report and the sentence summarising it that disagree about where
+// a line may break look like two different programs.
 //
 // Counting runes instead of columns would let a Chinese headline overflow the
 // terminal, since each ideograph occupies two cells. Breaking wherever the
@@ -267,7 +271,7 @@ func overviewLines(r diagnose.Report) []string {
 // splits file paths mid-component ("/var/lib/mysql/i" / "bdata1"), so a break
 // at the last legal point wins when one exists. An explicit newline is always
 // a hard break.
-func wrap(s string, width int) []string {
+func Wrap(s string, width int) []string {
 	if s == "" {
 		return nil
 	}

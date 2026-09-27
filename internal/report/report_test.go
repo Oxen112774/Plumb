@@ -13,7 +13,7 @@ import (
 // Each ideograph occupies two terminal cells, so a rune count would let a
 // Chinese headline overflow its column.
 func TestWrapCountsWideRunesAsTwoColumns(t *testing.T) {
-	got := wrap("中文中文中文", 4)
+	got := Wrap("中文中文中文", 4)
 	want := []string{"中文", "中文", "中文"}
 	if len(got) != len(want) {
 		t.Fatalf("wrap = %q, want %q", got, want)
@@ -28,7 +28,7 @@ func TestWrapCountsWideRunesAsTwoColumns(t *testing.T) {
 // Breaking wherever the limit lands turns English advice into noise
 // ("...fs" / "ync 过频"), so a break at the last space wins.
 func TestWrapBreaksAtSpaceRatherThanSplittingWords(t *testing.T) {
-	got := wrap("hello world foo", 12)
+	got := Wrap("hello world foo", 12)
 	want := []string{"hello world", "foo"}
 	if len(got) != len(want) {
 		t.Fatalf("wrap = %q, want %q", got, want)
@@ -43,7 +43,7 @@ func TestWrapBreaksAtSpaceRatherThanSplittingWords(t *testing.T) {
 // A single word longer than the column budget still has to be emitted, or the
 // report would lose text.
 func TestWrapEmitsOverlongWord(t *testing.T) {
-	got := wrap("abcdefghijklmnop", 6)
+	got := Wrap("abcdefghijklmnop", 6)
 	if len(got) < 2 {
 		t.Fatalf("wrap = %q, want the word split across lines", got)
 	}
@@ -55,7 +55,7 @@ func TestWrapEmitsOverlongWord(t *testing.T) {
 // A full stop at the start of a line is a visible defect in Chinese
 // typography; overflowing by one glyph is the lesser evil.
 func TestWrapDoesNotOrphanClosingPunctuation(t *testing.T) {
-	got := wrap("中文中文。", 8)
+	got := Wrap("中文中文。", 8)
 	if len(got) != 1 {
 		t.Fatalf("wrap = %q, want the full stop kept with the text it closes", got)
 	}
@@ -67,7 +67,7 @@ func TestWrapDoesNotOrphanClosingPunctuation(t *testing.T) {
 // An opening bracket may not end a line either: whatever it opens belongs on
 // the same line as it.
 func TestWrapDoesNotOrphanOpeningBracket(t *testing.T) {
-	got := wrap("中文中文中文中文中（后面的内容很长很长很长很长很长很长", 20)
+	got := Wrap("中文中文中文中文中（后面的内容很长很长很长很长很长很长", 20)
 	for i, line := range got[:len(got)-1] {
 		if strings.HasSuffix(line, "（") {
 			t.Errorf("line %d = %q ends with an opening bracket", i, line)
@@ -79,7 +79,7 @@ func TestWrapDoesNotOrphanOpeningBracket(t *testing.T) {
 // limit keeps a Chinese paragraph from leaving a third of every other line
 // empty, which is what happens when only separators count as break points.
 func TestWrapFillsChineseLinesToTheColumnBudget(t *testing.T) {
-	got := wrap("这是一个很长的中文句子用来测试换行行为是否填满整行", 20)
+	got := Wrap("这是一个很长的中文句子用来测试换行行为是否填满整行", 20)
 	if len(got) < 3 {
 		t.Fatalf("wrap = %q, want several lines", got)
 	}
@@ -93,7 +93,7 @@ func TestWrapFillsChineseLinesToTheColumnBudget(t *testing.T) {
 // The flip side: a separator so early in the budget that honouring it would
 // leave the line mostly empty is not worth taking.
 func TestWrapDoesNotStopAtAnEarlySeparator(t *testing.T) {
-	got := wrap("短、这是一个很长的中文句子用来测试换行是否填满整行整行", 20)
+	got := Wrap("短、这是一个很长的中文句子用来测试换行是否填满整行整行", 20)
 	if len(got) < 2 {
 		t.Fatalf("wrap = %q, want several lines", got)
 	}
@@ -110,7 +110,7 @@ func TestWrapDoesNotStopAtAnEarlySeparator(t *testing.T) {
 func TestWrapMeasuresSeparatorsInColumns(t *testing.T) {
 	// The only separator is at rune 1 — column 2 — nowhere near the halfway
 	// point of a 20-column line, so it must not be honoured.
-	got := wrap("短、这是一个很长很长的中文句子需要换行很多次才够", 20)
+	got := Wrap("短、这是一个很长很长的中文句子需要换行很多次才够", 20)
 	if len(got) < 2 {
 		t.Fatalf("wrap = %q, want several lines", got)
 	}
@@ -123,7 +123,7 @@ func TestWrapMeasuresSeparatorsInColumns(t *testing.T) {
 // A space stranded at either edge of a line is a visible defect, and it is what
 // a naive break does when the budget runs out next to one.
 func TestWrapNeverStrandsASpaceAtALineEdge(t *testing.T) {
-	got := wrap("说明瓶颈是一个线程干完全部活不是 CPU 不够导致的响应变慢", 20)
+	got := Wrap("说明瓶颈是一个线程干完全部活不是 CPU 不够导致的响应变慢", 20)
 	for _, line := range got {
 		if strings.HasPrefix(line, " ") || strings.HasSuffix(line, " ") {
 			t.Errorf("line %q has a space at its edge", line)

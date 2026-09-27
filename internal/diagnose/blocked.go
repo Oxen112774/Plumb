@@ -21,6 +21,14 @@ const (
 	coreSkewIdleAvg = 70.0
 )
 
+// HeldFilesHeader marks the line in a culprit note below which the files a
+// blocked process holds open are listed, one per line.
+//
+// It is exported because package voice reads these notes too, to say in one
+// sentence what a blocked process is holding. A marker written out in two
+// packages is a marker that will drift in one of them.
+const HeldFilesHeader = "持有文件："
+
 // ruleBlockedThreads reports the processes the kernel has stopped dead.
 //
 // A thread in D state is in uninterruptible sleep. It is not runnable, and it
@@ -129,7 +137,7 @@ func (a *analysis) ruleBlockedThreads() *Finding {
 			// One path per line: a long list wrapped to the column budget
 			// breaks paths mid-component, and the path is the piece of
 			// evidence here that has to survive being read aloud.
-			note.WriteString("持有文件：")
+			note.WriteString(HeldFilesHeader)
 			for _, p := range set.Paths {
 				note.WriteString("\n  " + p)
 			}
