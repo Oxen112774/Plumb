@@ -18,6 +18,8 @@ import sys
 BLOCKS = [
     ("plumb · 服务器卡顿归因", "demo.txt"),
     ("plumb · prod-db-01 · 严重", "voice.txt"),
+    ("不确定的地方，每一片里都写着", "why.txt"),
+    ("balance_dirty_pages · 内核等待点 · 可信度：有依据", "why-leaf.txt"),
 ]
 
 

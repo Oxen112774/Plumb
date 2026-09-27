@@ -1,0 +1,26 @@
+balance_dirty_pages · 内核等待点 · 可信度：有依据
+
+它是什么
+  写入者被内核按住，等脏页降到限以下。
+
+为什么会出现
+  · 这个进程写盘的速度超过了内核后台刷盘的速度，脏页堆到 vm.dirty_ratio
+    附近，内核只能把写入者按停
+  · 这是限流，不是盘坏了 —— 内核在拿延迟换内存不被写爆
+
+怎么处置
+  · 把 vm.dirty_background_ratio 调小，让后台刷盘更早开始：这是关键的一步
+  · 不要靠调大 vm.dirty_ratio 来解决 —— 那只会让积压更深，停顿时更长
+  · 用 cgroup v2 的 io.max 给这个进程限速，让它自己慢下来而不是被内核按住
+  · 降低写入速率本身，或者把盘换成能跟上写入量的
+
+看不到的地方
+  这是内核主动限流，不是磁盘忙碌：iostat 上这块盘可能并不满，
+  光看盘的指标找不到问题在这里。
+
+出处
+  · 内核源码 mm/page-writeback.c
+  · 内核文档 Documentation/admin-guide/sysctl/
+    vm.rst（dirty_background_ratio、dirty_bytes、dirty_ratio）
+
+这一片来自内置的知识树：没有联网，也没有动你的系统。

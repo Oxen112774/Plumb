@@ -31,7 +31,7 @@ import (
 	"github.com/Oxen112774/plumb/internal/voice"
 )
 
-const version = "0.3.0"
+const version = "0.4.0"
 
 // errUsage means the flag package has already printed both the error and the
 // usage text, so main must not add a line of its own on top of it.
@@ -93,17 +93,45 @@ func run(args []string, usage io.Writer) error {
 			"-watch 最多看几轮后退出；0 表示一直看下去（在演示数据上验证时用）")
 		useAI = fs.Bool("ai", false,
 			"用模型补一段综合判断；需要环境变量 PLUMB_AI_URL 与 PLUMB_AI_MODEL")
+
+		why = fs.String("why", "",
+			"查一片知识叶子：给内核等待点符号、判定项名字或 /proc 文件名；\n"+
+				"      不给值就列出全部。不采样、不出报告，任何平台上都能用")
 	)
-	if err := fs.Parse(args); err != nil {
+	if err := fs.Parse(bareWhy(args)); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			return nil // -h: the usage text was the answer, and it is a success
 		}
 		return errUsage
 	}
 
+	set := map[string]bool{}
+	fs.Visit(func(f *flag.Flag) { set[f.Name] = true })
+
 	if *showVersion {
 		fmt.Println("plumb " + version)
 		return nil
+	}
+
+	// -why is answered before anything else, because it does none of the things
+	// the rest of the program does: it does not sample, does not read /proc and
+	// does not produce a report. Someone reading the tree on their laptop should
+	// not be told that their machine has no /proc.
+	//
+	// The only flag that means anything alongside it is -no-color, so anything
+	// else is refused rather than quietly ignored. Silently dropping a flag
+	// someone typed is how a tool teaches them not to trust it.
+	if set["why"] {
+		for _, name := range []string{
+			"json", "voice", "watch", "every", "rounds", "assert", "ai",
+			"root", "prev-root", "d", "mount", "top", "files",
+		} {
+			if set[name] {
+				return fmt.Errorf("-why 单独用：它查的是内置的知识树，"+
+					"不采样、也不出报告，所以 -%s 和它放在一起没有意义", name)
+			}
+		}
+		return writeWhy(os.Stdout, *why, !*noColor)
 	}
 
 	if *asJSON && (*speak || *watch) {

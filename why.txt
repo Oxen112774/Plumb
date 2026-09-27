@@ -1,0 +1,94 @@
+plumb 的知识树里有 75 片叶子。
+查一片：plumb -why <键>。键可以是内核等待点符号、判定项的名字，或者 /proc
+里的文件名。大小写随意，前缀能对上就行。
+
+内核等待点（51）
+  io_schedule                      线程已经进了块设备层，在等一次 IO 返回
+  blk_mq_get_tag                   在等块设备队列里的一个名额（tag）
+  blk_mq_freeze_queue_wait         块设备队列被冻住了，在等它放开
+  blkdev_issue_flush               在让设备把写缓存刷到盘上
+  do_blockdev_direct_IO            在做直接 IO，绕过了页缓存
+  nvme_queue_rq                    在等 NVMe 设备返回
+  scsi_queue_rq                    在等 SCSI 层完成一次命令
+  md_write_start                   在等软件 RAID 允许这次写开始
+  dm_suspend                       在等 device-mapper 的目标设备把 IO 做完
+  rpc_wait_bit_killable            在等一次 NFS 往返
+  fuse_file_read_iter              在等一个用户态的 FUSE 服务回话
+  jbd2_log_wait_commit             在等一次 ext4 日志提交完成
+  jbd2_journal_commit_transaction
+                                   jbd2 内核线程正在提交 ext4 日志
+  xfs_log_force                    在等 XFS 把日志强制刷到盘上
+  ext4_sync_file                   在等一次 fsync 落盘
+  balance_dirty_pages              写入者被内核按住，等脏页降到限以下
+  wait_on_page_writeback           在等某一页写完
+  wait_on_page_bit                 在等某一页的就绪状态（锁或回写）
+  filemap_fault                    缺页，要把数据从盘上读回来
+  btrfs_commit_transaction         在等一次 btrfs 事务提交或 extent 落盘
+  ksys_sync                        在等一次整机 sync 把所有脏数据写完
+  try_to_free_pages                在分配内存时被迫自己动手回收
+  shrink_inactive_list             在从 LRU 上回收一批页
+  shrink_node                      kswapd 后台回收线程在回收内存
+  shrink_slab                      在回收内核对象缓存（slab）
+  __alloc_pages_slowpath           内存分配走了慢路径
+  try_to_free_mem_cgroup_pages     在给 cgroup 的账本回收内存
+  compact_zone                     在整理内存碎片，把页挪到一起
+  collapse_huge_page               khugepaged 在把普通页折叠成大页
+  rwsem_down_write_slowpath        在等一把内核读写锁的写权限
+  rwsem_down_read_slowpath         在等一把内核读写锁的读权限
+  __mutex_lock                     在等一把内核互斥锁
+  down_write                       在等一把内核信号量
+  _raw_spin_lock                   在自旋等一把内核自旋锁
+  futex_wait                       在等应用自己的锁
+  synchronize_rcu                  在等一个 RCU 宽限期结束
+  sk_stream_wait_memory            TCP 发送缓冲满了，在等有空位
+  tcp_sendmsg                      在 TCP 发送路径上等
+  tcp_recvmsg                      在等 TCP 数据到达
+  __skb_wait_for_more_packets      套接字读缓冲空了，在等更多包
+  inet_csk_accept                  服务端在等一个新连接进来
+  inet_wait_for_clear_once         在等一条 TCP 连接彻底消失
+  unix_stream_read_generic         在等一个 Unix socket 的数据
+  ep_poll                          事件循环在等下一个事件
+  poll_schedule_timeout            在等文件描述符就绪（poll/select）
+  nanosleep                        在按计划休眠
+  do_wait                          父进程在等子进程退出
+  pipe_read                        在等管道另一端写入
+  pipe_write                       管道写满了，在等对端读走
+  msleep                           内核代码在按计划休眠
+  wait_for_completion              在等另一段代码宣布“做完了”
+
+判定项（10）
+  磁盘 IO                          这条判定看的是有多少时间在等磁盘，
+                                   不是磁盘有多忙
+  内存                             这条判定看的是内存压力，
+                                   不是内存用了多少
+  CPU                              这条判定看的是有任务在等 CPU 跑，不是
+                                   CPU 跑得有多满
+  CPU 被抢占                       这台虚机的 CPU 时间被宿主机拿走了
+  交换分区                         在拿磁盘当内存用
+  磁盘空间                         挂载点的剩余空间不够了
+  脏页                             已经改过但还没写回磁盘的数据积压了
+  被堵住的线程                     有线程进了不可中断睡眠，在等存储或内存
+  单核跑满                         一个核被单个线程占满，而其余核闲着
+  整体                             这是没发现具体问题时用来收尾的合成项
+
+数据来源（14）
+  /proc/pressure/io                PSI 的 IO 压力：有多少时间在等 IO
+  /proc/pressure/cpu               PSI 的 CPU 压力：有多少时间有任务在等
+                                   CPU
+  /proc/pressure/memory            PSI 的内存压力：有多少时间在等内存回收
+  /proc/stat                       整机与逐核的 CPU 时间账本
+  /proc/meminfo                    内存的明细账本
+  /proc/vmstat                     虚拟内存子系统的累计计数器
+  /proc/loadavg                    1、5、15 分钟的平均负载，
+                                   以及正在运行的线程数
+  /proc/<pid>/io                   某个进程累计的读写字节数
+  /proc/<pid>/stat                 进程的状态与统计，包括它被 IO
+                                   阻塞了多久
+  /proc/<pid>/task                 进程下每个线程的目录
+  /proc/<pid>/wchan                线程此刻停在内核的哪个函数上
+  /proc/<pid>/fd                   进程打开的每个文件描述符指向什么
+  /proc/mdstat                     软件 RAID 阵列的状态与重建进度
+  /proc/slabinfo                   内核对象缓存的占用明细
+
+不确定的地方，每一片里都写着 —— 这一棵树不含糊其辞。
+看一片的全文：plumb -why <键>
