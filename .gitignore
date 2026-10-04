@@ -1,13 +1,23 @@
 # ---- build output ----
+# 二进制一律不入库，但源码要能编译。别人 clone 之后
+# `go build ./...` 就得到 plumb，不需要仓库里预先放一个 exe。
 /plumb
 /plumb.exe
 /snapshot
 /snapshot.exe
 dist/
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+*.test
 
-# ---- Go workspace ----
+# Go workspace 与 vendor。go.work 是本机的多模块编排，不该由别人继承；
+# vendor 只有在明确选择 vendoring 时才出现，那时它是刻意提交的。
 go.work
 go.work.sum
+/vendor/
 
 # 编译缓存。放仓库里毫无意义，而且体积到 150MB+，
 # 每次 go build 都会让工作区变 dirty，污染 git status。
@@ -30,15 +40,21 @@ go.work.sum
 /media/
 
 # ---- 预览与截图缓存 ----
+# 只排 media/ 下的截图目录。**不要写 *.png** —— 那会把将来
+# README 里的架构图、文档配图一并挡掉，而图是不可替代的项目内容。
 *.shots/
-*.png
 
 # ---- 运行时产物 ----
 # 快照与 fixture 是本地生成的，不入版本库。
 /out/
 *.out
 *.prof
-*.test
+*.coverprofile
+coverage.txt
+
+# 手工调试时留下的临时文件。显式列出而不是用通配符：
+# 任何 .st 都要人看一眼再决定，不该被一条规则静默吃掉。
+/.st
 
 # ---- 凭据 ----
 # 任何形式的密钥都不进仓库。CI 用的凭据走 secrets 引用，
