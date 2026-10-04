@@ -226,3 +226,46 @@ func TestFindingsAreOrderedWorstFirst(t *testing.T) {
 		}
 	}
 }
+
+// A stored snapshot's timestamp is when it was *read*, not the window its
+// counters span. Two archives opened back to back are microseconds apart, so
+// using that gap as the divisor inflates every rate by the ratio of the real
+// window to the read time — on the demo fixtures that turned 40 MiB/s into
+// 909 MiB/s, right in the headline example of the README.
+func TestArchiveIntervalUsesTheNominalWindow(t *testing.T) {
+	// 100 ticks of new work. CPU ticks count hundredths of a second, so over
+	// a nominal 1s window that is one full core — and over a 3s gap the same
+	// 100 ticks would read as a third of a core.
+	prev := probe.Snapshot{At: time.Now()}
+	cur := probe.Snapshot{At: time.Now(), CPU: probe.CPUTimes{User: 100}}
+
+	t.Run("archive", func(t *testing.T) {
+		// The archive is opened a millisecond after the current tree — a gap
+		// that says nothing about the window its counters span.
+		p2, c2 := prev, cur
+		c2.At = p2.At.Add(time.Millisecond)
+		rep := Analyze(p2, c2, Options{Interval: time.Second, PrevIsArchive: true})
+
+		if rep.Interval != time.Second {
+			t.Errorf("archive interval = %v, want the nominal 1s", rep.Interval)
+		}
+		if got := PercentOfCore(100, rep.Interval); got != 100 {
+			t.Errorf("core usage = %v%%, want 100%% — reading an archive must not rescale the rate", got)
+		}
+	})
+
+	t.Run("sampled", func(t *testing.T) {
+		// Two live samples 3s apart: the real gap is the honest denominator,
+		// because the counters really did accumulate over it.
+		p2, c2 := prev, cur
+		c2.At = p2.At.Add(3 * time.Second)
+		rep := Analyze(p2, c2, Options{Interval: time.Second, PrevIsArchive: false})
+
+		if rep.Interval != 3*time.Second {
+			t.Errorf("sampled interval = %v, want the real 3s", rep.Interval)
+		}
+		if got := PercentOfCore(100, rep.Interval); got == 100 {
+			t.Error("sampled core usage = 100%; the 3s gap must shrink it")
+		}
+	})
+}

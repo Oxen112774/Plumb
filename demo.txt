@@ -1,6 +1,6 @@
 plumb │ prod-db-01 │ Linux 5.15.0-91-generic │ 2 核心 │ up 12 天 0 小时
 load 2.21 1.90 1.44 | 1.10/core
-2026-10-03 20:43:17 | 1s 两次采样
+2026-10-05 04:20:21 | 1s 两次采样
 
   CPU ████▊░░░░░░░░░░░░░░░  24.6%
   MEM ▌░░░░░░░░░░░░░░░░░░░   3.6%  (some 9.2%)
@@ -11,7 +11,7 @@ load 2.21 1.90 1.44 | 1.10/core
   ──────────────────────────────────────────────────────────────────────
   1234    1240    mysqld           jbd2_log_wait_commit     D     ext4/jbd2 日志 ← jbd2_log_wait_commit
   1234    1241    mysqld           io_schedule              D     NFS/RPC ← nfs_wait_bit_killable
-  3000    3001    node             filemap_fault            D     cgroup 内存回收 ← shrink_node_memcg
+  3000    3001    node             filemap_fault            D     cgroup 内存回收 ← try_to_free_mem_cgroup_pages
 
 判定 (9)
 
@@ -103,7 +103,8 @@ load 2.21 1.90 1.44 | 1.10/core
                        /var/lib/mysql/prod/orders.ibd
         PID 3000    node
                      线程 3001：缺页，要从磁盘读回来  [filemap_fault]
-                       内核栈：cgroup 内存回收（依据 shrink_node_memcg）
+                       内核栈：cgroup 内存回收（依据
+                     try_to_free_mem_cgroup_pages）
                      持有文件：
                        /home/app/server.js
                        /var/log/app/app.log
@@ -120,7 +121,7 @@ load 2.21 1.90 1.44 | 1.10/core
                            重启本机无效）；卡在 cgroup 的内存回收：容器限额太小，
                            内核在限额内反复回收；卡在 ext4 的日志提交（jbd2）：
                            文件系统在等它自己的事务落盘
-        /proc/pressure/io  full avg10=17.40：与上面的被堵线程互相印证
+        /sys/fs/cgroup/io.pressure full avg10=24.50：与上面的被堵线程互相印证
 
       怎么办
         这台机器没有问题 —— 它在等远端。去看 NFS 服务器和中间的网络：
@@ -161,7 +162,7 @@ load 2.21 1.90 1.44 | 1.10/core
         很难在日志里看出来。先找出工作集超标的进程。
 
    ·  单核跑满
-      CPU0 已经跑满（99%），整机平均却只有 42.5%
+      CPU0 已经跑满（94%），整机平均却只有 30.0%
 
       元凶进程
         PID 3000    node               [app]
@@ -169,8 +170,8 @@ load 2.21 1.90 1.44 | 1.10/core
 
       证据
         plumb              1 个核心中有 4 个被单个线程占满，其余核心空闲
-        /proc/stat         整机 busy=42.5% user=25.0% system=5.0%
-        /proc/stat         cpu0 busy=99.0% iowait=0.0% steal=5.0%
+        /proc/stat         整机 busy=30.0% user=25.0% system=5.0%
+        /proc/stat         cpu0 busy=94.0% iowait=0.0% steal=5.0%
         /proc/<pid>/stat   PID 3000 上一次运行在 CPU0 上（字段 39 processor）——
                            与上面那个满核对得上，这是指认它的依据
         plumb              逐核行来自 /proc/stat，是宿主机的视图；本 cgroup 只有 2 核
@@ -202,8 +203,8 @@ load 2.21 1.90 1.44 | 1.10/core
         vm.dirty_background_ratio 可以让刷盘更平滑。
 
 概况
-  CPU      繁忙 42.5%   用户 25.0%   系统 5.0%   等磁盘 7.5%   被抢占 5.0%
-  核心     CPU0 99%  CPU1 26%  CPU2 23%  CPU3 22%
+  CPU      繁忙 30.0%（用户 25.0% 系统 5.0%）｜不计入繁忙：等磁盘 7.5% 被抢占 5.0%
+  核心     CPU0 94%  CPU1 11%  CPU2 8%  CPU3 7%
   内存     已用 63.1%（9.9 GiB / 15.6 GiB）   交换 9.4%
   负载     load1 2.21，2 核，每核 1.10
   线程     共 13 个，其中 3 个处于 D 状态（不可中断，kill 不掉）

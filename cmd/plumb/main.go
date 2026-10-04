@@ -40,7 +40,7 @@ import (
 // -ldflags "-X main.version=..." rather than keeping the same number correct in
 // two places. A binary that reports the wrong version is worse than one that
 // reports none: it is the first thing anyone checks when a fix does not land.
-var version = "1.0.1"
+var version = "1.0.2"
 
 // stdoutIsTerminal reports whether standard output is a console rather than a
 // pipe, a file or a CI log.
@@ -341,6 +341,13 @@ func diagnoseOnce(root probe.Root, s settings) diagnose.Report {
 		Top:        s.top,
 		Thresholds: s.thresholds,
 		Lang:       s.lang,
+		// Reading a stored snapshot is not sampling. Snapshot.At records when
+		// the file was *read*, so two archives read back to back look 50ms
+		// apart while the counters inside them describe a full -d window —
+		// dividing by that 50ms inflates every rate 20-fold. Say so
+		// explicitly instead of letting the timestamps imply a gap that the
+		// user never asked for.
+		PrevIsArchive: s.prevRoot != "",
 	})
 }
 

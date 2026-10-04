@@ -300,6 +300,12 @@ type Options struct {
 	Thresholds Thresholds
 	// Lang is the language the finding text is written in.
 	Lang i18n.Lang
+	// PrevIsArchive says the previous snapshot was read from a stored
+	// directory rather than sampled from the running machine. An archive's
+	// timestamp is when it was opened, so its "gap" to the current sample
+	// measures file I/O, not the window the counters span — Interval is then
+	// the only honest denominator.
+	PrevIsArchive bool
 }
 
 // Analyze compares two snapshots and produces a ranked report.
@@ -320,9 +326,17 @@ func Analyze(prev, cur probe.Snapshot, opts Options) Report {
 	// when this tool matters most. Dividing by the nominal interval then
 	// reports "10 cores busy" on a machine doing 1 core of work.
 	// Both snapshots carry the time they were taken, so use the real gap.
+	//
+	// The exception is an archive: with -prev-root the first snapshot is read
+	// from disk, and Snapshot.At is the moment of the *read*. Two archives
+	// read in sequence are microseconds apart no matter what window the
+	// counters inside them span, so the real gap there measures how fast this
+	// tool can open files — not the interval the user is asking about.
 	interval := opts.Interval
-	if d := cur.At.Sub(prev.At); d > 0 {
-		interval = d
+	if !opts.PrevIsArchive {
+		if d := cur.At.Sub(prev.At); d > 0 {
+			interval = d
+		}
 	}
 	a := &analysis{
 		prev:     prev,

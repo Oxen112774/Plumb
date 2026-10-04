@@ -24,7 +24,7 @@ load 2.21 1.90 1.44 | 1.10/core
   ──────────────────────────────────────────────────────────────────────
   1234    1240    mysqld           jbd2_log_wait_commit     D     ext4/jbd2 日志 ← jbd2_log_wait_commit
   1234    1241    mysqld           io_schedule              D     NFS/RPC ← nfs_wait_bit_killable
-  3000    3001    node             filemap_fault            D     cgroup 内存回收 ← shrink_node_memcg
+  3000    3001    node             filemap_fault            D     cgroup 内存回收 ← try_to_free_mem_cgroup_pages
 
 判定 (9)
 
@@ -57,8 +57,8 @@ load 2.21 1.90 1.44 | 1.10/core
   …（另有 内存配额 / 网络 / 被堵住的线程 / CPU 被抢占 / 交换分区 / 单核跑满 / 脏页 七节，格式相同）
 
 概况
-  CPU      繁忙 42.5%   用户 25.0%   系统 5.0%   等磁盘 7.5%   被抢占 5.0%
-  核心     CPU0 99%  CPU1 26%  CPU2 23%  CPU3 22%
+  CPU      繁忙 30.0%（用户 25.0% 系统 5.0%）｜不计入繁忙：等磁盘 7.5% 被抢占 5.0%
+  核心     CPU0 94%  CPU1 11%  CPU2 8%  CPU3 7%
   内存     已用 63.1%（9.9 GiB / 15.6 GiB）   交换 9.4%
   负载     load1 2.21，2 核，每核 1.10
   线程     共 13 个，其中 3 个处于 D 状态（不可中断，kill 不掉）
@@ -274,7 +274,7 @@ wchan 是**最内层**的一个函数名。看到 `io_schedule` 你知道在等�
   ──────────────────────────────────────────────────────────────────────────────
   1234    1240    mysqld           jbd2_log_wait_commit     D     ext4/jbd2 日志 ← jbd2_log_wait_commit
   1234    1241    mysqld           io_schedule              D     NFS/RPC ← nfs_wait_bit_killable
-  3000    3001    node             filemap_fault            D     cgroup 内存回收 ← shrink_node_memcg
+  3000    3001    node             filemap_fault            D     cgroup 内存回收 ← try_to_free_mem_cgroup_pages
 ```
 
 两行的 WCHAN 看着都是「在等 I/O」，归类却完全不同：第二行根本不在本机。**箭头后面的帧是故意留的** —— 归类规则写在 `internal/probe/stack.go` 里，一个前缀顺序的改动就能改变结论，所以 plumb 把依据摊开让你自己看，而不是让你信一个结论。认不出来时这一列留空，不猜。
