@@ -1,0 +1,57 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+
+# The checks here are the ones that cannot be verified by reading the code:
+# that the tests pass on Linux (the platform this tool targets and the one its
+# fixtures imitate), and that the sample output in the README is still what the
+# program actually prints. A README whose examples have drifted is worse than a
+# README with none, because the reader has no way to tell.
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: gofmt
+        run: |
+          unformatted="$(gofmt -l cmd internal tools)"
+          if [ -n "$unformatted" ]; then
+            echo "these files are not gofmt'd:"
+            echo "$unformatted"
+            exit 1
+          fi
+
+      - name: go vet
+        run: go vet ./...
+
+      - name: go test
+        run: go test ./...
+
+      # The development machine is Windows, so a change that builds there and
+      # not on Linux would otherwise reach main unnoticed.
+      - name: build linux
+        run: go build ./...
+
+      - name: build windows
+        run: GOOS=windows go build ./...
+
+      # Every sample in the README is a real capture. If the program's output
+      # changed and the README did not, this fails and names the line.
+      - name: README captures are verbatim
+        run: python3 tools/checkreadme.py
+
+      # The fixture tree is generated, so it must not drift from its generator:
+      # a hand-edited fixture is a test that passes for a reason nobody wrote
+      # down.
+      - name: fixture matches its generator
+        run: |
+          go run ./tools/genfixture
+          git diff --exit-code -- testdata

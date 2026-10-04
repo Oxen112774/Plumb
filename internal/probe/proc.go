@@ -27,6 +27,12 @@ type Process struct {
 	// the thread table is not walked.
 	NThreads uint64 `json:"nthreads"`
 
+	// LastCPU is the core this process last ran on (field 39). See
+	// procStatFields: it is what lets a per-core finding name a process
+	// instead of guessing.
+	LastCPU      int  `json:"last_cpu"`
+	LastCPUKnown bool `json:"last_cpu_known"`
+
 	// BlkIOTicks is cumulative time blocked on block I/O (see procStatFields).
 	BlkIOTicks uint64 `json:"blkio_ticks"`
 	BlkIOKnown bool   `json:"blkio_known"`
@@ -76,10 +82,14 @@ func ReadProcesses(r Root, pids []int, users map[int]string) []Process {
 		if err != nil {
 			continue
 		}
-		if u, ok := users[p.UID]; ok {
-			p.User = u
-		} else {
-			p.User = strconv.Itoa(p.UID)
+		// UID < 0 means /proc/<pid>/status could not be read; leave the user
+		// empty rather than printing a user literally named "-1".
+		if p.UID >= 0 {
+			if u, ok := users[p.UID]; ok {
+				p.User = u
+			} else {
+				p.User = strconv.Itoa(p.UID)
+			}
 		}
 		out = append(out, p)
 	}
@@ -99,15 +109,17 @@ func readProcess(r Root, pid int) (Process, error) {
 	}
 
 	p := Process{
-		PID:        pid,
-		Name:       st.Name,
-		UTime:      st.UTime,
-		STime:      st.STime,
-		MajFlt:     st.MajFlt,
-		RSSPages:   st.RSSPages,
-		NThreads:   st.NThreads,
-		BlkIOTicks: st.BlkIOTicks,
-		BlkIOKnown: st.BlkIOKnown,
+		PID:          pid,
+		Name:         st.Name,
+		UTime:        st.UTime,
+		STime:        st.STime,
+		MajFlt:       st.MajFlt,
+		RSSPages:     st.RSSPages,
+		NThreads:     st.NThreads,
+		BlkIOTicks:   st.BlkIOTicks,
+		BlkIOKnown:   st.BlkIOKnown,
+		LastCPU:      st.LastCPU,
+		LastCPUKnown: st.LastCPUKnown,
 	}
 
 	if data, err := r.ReadFile(dir + "/io"); err == nil {
@@ -136,6 +148,15 @@ type procStatFields struct {
 	STime    uint64 // field 15
 	NThreads uint64 // field 20
 	RSSPages uint64 // field 24
+
+	// LastCPU is field 39, processor: which CPU this task last ran on.
+	//
+	// It is the only link between a process and a *specific* core. Every other
+	// CPU number is either per-process (its own ticks) or per-machine (the
+	// aggregate), so without this field "this process is pinning core 0" is a
+	// guess from two unrelated facts: something is busy, and a core is busy.
+	LastCPU      int
+	LastCPUKnown bool
 
 	// BlkIOTicks is field 42, delayacct_blkio_ticks: cumulative time this task
 	// spent blocked on block I/O. It is the one counter that measures being
@@ -205,6 +226,14 @@ func parseProcStat(data []byte) (procStatFields, error) {
 	}
 	if out.RSSPages, err = at(21, "rss"); err != nil { // field 24
 		return out, err
+	}
+	// Field 39 is a plain counter on every kernel that writes it, but a line
+	// truncated before it is a missing measurement, not an error — the same
+	// rule as field 42 below.
+	if len(rest) > 36 {
+		if v, err := atou(rest[36]); err == nil {
+			out.LastCPU, out.LastCPUKnown = int(v), true
+		}
 	}
 	// Field 42 is absent on kernels without delay accounting; that is a
 	// missing measurement, not an error.

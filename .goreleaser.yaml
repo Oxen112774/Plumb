@@ -1,0 +1,54 @@
+# Cross-compiled binaries on every tag, so installing plumb is one curl and
+# not "install a Go toolchain first". The tool is meant to be run on a machine
+# that is already having a bad day, and a build step is not what that moment
+# needs.
+version: 2
+
+before:
+  hooks:
+    - go mod tidy
+
+builds:
+  - id: plumb
+    main: ./cmd/plumb
+    binary: plumb
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+      - darwin
+    goarch:
+      - amd64
+      - arm64
+    # The version printed by -version comes from a constant in the source, so
+    # it is injected at build time rather than maintained in two places that
+    # would drift apart.
+    ldflags:
+      - -s -w -X main.version={{ .Version }}
+
+archives:
+  - id: plumb
+    formats: [tar.gz]
+    name_template: "plumb_{{ .Os }}_{{ .Arch }}"
+    files:
+      - README.md
+      - LICENSE
+
+checksum:
+  name_template: "checksums.txt"
+
+snapshot:
+  version_template: "{{ incpatch .Version }}-next"
+
+changelog:
+  sort: asc
+  filters:
+    exclude:
+      - "^docs:"
+      - "^test:"
+      - "^chore:"
+
+release:
+  # A release that has not been read by a human is not a release. Draft it and
+  # let whoever cut the tag write the notes.
+  draft: true

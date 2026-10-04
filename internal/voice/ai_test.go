@@ -6,6 +6,8 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+
+	"github.com/Oxen112774/plumb/internal/i18n"
 	"testing"
 )
 
@@ -131,10 +133,10 @@ func TestWriteFallsBackWhenTheModelFails(t *testing.T) {
 	defer srv.Close()
 
 	var withModel, without strings.Builder
-	if err := Write(&withModel, sampleReport(), false, testModel(t, srv)); err != nil {
+	if err := Write(&withModel, sampleReport(), false, testModel(t, srv), i18n.ZH); err != nil {
 		t.Fatalf("Write: %v", err)
 	}
-	if err := Write(&without, sampleReport(), false, nil); err != nil {
+	if err := Write(&without, sampleReport(), false, nil, i18n.ZH); err != nil {
 		t.Fatalf("Write: %v", err)
 	}
 	if withModel.String() != without.String() {
@@ -148,7 +150,7 @@ func TestWriteIncludesAGroundedModelParagraph(t *testing.T) {
 	defer srv.Close()
 
 	var b strings.Builder
-	if err := Write(&b, sampleReport(), false, testModel(t, srv)); err != nil {
+	if err := Write(&b, sampleReport(), false, testModel(t, srv), i18n.ZH); err != nil {
 		t.Fatalf("Write: %v", err)
 	}
 	out := b.String()

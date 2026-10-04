@@ -42,6 +42,38 @@ func TestParseProcStatHandlesCommWithSpacesAndParens(t *testing.T) {
 	}
 }
 
+// Field 39 is the only link between a process and a specific core, and
+// therefore the only thing that lets a per-core finding name a process instead
+// of guessing from two unrelated facts.
+func TestParseProcStatReadsLastCPU(t *testing.T) {
+	line := []byte("42 (x) S 1 42 42 0 -1 4194560 100 0 7 0 111 222 " +
+		"0 0 20 0 3 0 99 1234 500 18446744073709551615 0 0 0 0 0 0 0 0 0 0 0 0 17 3 0 0 0 0 0 0")
+
+	st, err := parseProcStat(line)
+	if err != nil {
+		t.Fatalf("parseProcStat: %v", err)
+	}
+	if !st.LastCPUKnown {
+		t.Fatal("LastCPUKnown = false, want true — the line carries field 39")
+	}
+	if st.LastCPU != 3 {
+		t.Errorf("LastCPU = %d, want 3", st.LastCPU)
+	}
+}
+
+// A line that ends before field 39 is a missing measurement, not a claim that
+// the process ran on core 0 — same rule as field 42.
+func TestParseProcStatMarksAbsentLastCPUAsUnknown(t *testing.T) {
+	st, err := parseProcStat([]byte("1 (x) S 1 2 3 0 0 0 0 0 0 0 0 0 " +
+		"0 0 20 0 3 0 99 1234 500 18446744073709551615"))
+	if err != nil {
+		t.Fatalf("parseProcStat: %v", err)
+	}
+	if st.LastCPUKnown {
+		t.Errorf("LastCPUKnown = true on a line that ends before field 39")
+	}
+}
+
 func TestParseProcStatRejectsLineTruncatedBeforeRSS(t *testing.T) {
 	if _, err := parseProcStat([]byte("1 (x) S 1 2 3")); err == nil {
 		t.Fatal("want an error for a stat line that ends before the rss field")

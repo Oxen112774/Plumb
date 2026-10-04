@@ -205,6 +205,51 @@ var areaLeaves = []Leaf{
 		Confidence: Certain,
 	},
 	{
+		Key:   "网络",
+		Kind:  KindArea,
+		Alias: []string{"重传", "丢包", "retrans", "tcp", "listen drops", "accept队列"},
+		What:  "这条判定看的是丢了多少包、拒了多少连接，不是带宽用满了没有。",
+		Why: []string{
+			"重传率来自 /proc/net/snmp 的 RetransSegs 与 OutSegs：TCP 认为包丢了就再发一次，发端等 ack、收端等缺失的那一段，一个请求因此付了几个 RTT",
+			"accept 队列丢弃来自 /proc/net/netstat 的 ListenDrops：连接在应用 accept 之前就被丢了，所以应用自己的日志里什么都看不到",
+			"这两件事在 CPU、内存、磁盘上都不留痕迹 —— 一台重传两成包的机器，在其余判定里可以完全正常",
+		},
+		Fix: []string{
+			"先分清丢的是包还是心：内网 1% 都嫌多（查交换机端口、网卡降速、缓冲区），跨机房 2–3% 是常态",
+			"accept 队列在丢连接时，先确认应用不是卡在别处：队列满通常只是别处慢的最后一环，调大 net.core.somaxconn 只把症状推后",
+			"ss -lnt 看 Recv-Q/Send-Q 能定位到具体监听端口；netstat -s | grep -i retrans 看累计分布",
+		},
+		Unknown: "内核只给整机累计计数，不区分哪条连接、哪个对端，也不说是哪一跳在丢。定位到连接需要 ss -i 或者抓包 —— 那两件都要特权、也会打扰被诊断的机器，plumb 不做。",
+		Sources: []string{
+			"内核文档 Documentation/networking/snmp_counter.rst（TcpExt 各项的含义）",
+			"内核文档 Documentation/networking/proc_net_tcp.rst",
+			"内核源码 include/net/snmp.h、net/ipv4/tcp_input.c",
+		},
+		Confidence: Rough,
+	},
+	{
+		Key:   "内存配额",
+		Kind:  KindArea,
+		Alias: []string{"cgroup", "限额", "配额", "容器内存", "memory.max", "oom"},
+		What:  "这个 cgroup 的内存快到硬上限了 —— 到顶就是 OOM kill。",
+		Why: []string{
+			"plumb 读 /sys/fs/cgroup/memory.max 与 memory.current：那是这个 cgroup 自己的账。/proc/meminfo 在容器里报的是宿主机的内存，它警告不了这件事",
+			"memory.max 是墙不是坡：越过去内核就在这个 cgroup 里挑最大的进程杀掉，中间没有“变慢”这个阶段，也不是应用能捕获的错误",
+			"memory.events 里的 oom_kill 是已经发生过的事，不是预测 —— 它不为零，说明这条告警已经兑现过至少一次",
+		},
+		Fix: []string{
+			"先看是谁在涨：报告里按常驻内存排序的进程列表，列出的就是同一个 cgroup 里的",
+			"是泄漏就堵泄漏；是业务量到了就调大限额 —— 但调大之前先确认宿主机上真有那么多内存，否则只是把这个容器的死期换成宿主机上的争抢",
+			"重启容器能把计数清零，那只是救火，泄漏还在原处",
+		},
+		Unknown: "plumb 只知道这个 cgroup 的限额和用量，看不到宿主机还剩多少，也看不到同机别的容器在抢什么。限额定得对不对，必须拿宿主机的数字一起来看。",
+		Sources: []string{
+			"内核文档 Documentation/admin-guide/cgroup-v2.rst（memory.max、memory.current、memory.events）",
+			"内核源码 mm/memcontrol.c、mm/oom_kill.c",
+		},
+		Confidence: Certain,
+	},
+	{
 		Key:   "整体",
 		Kind:  KindArea,
 		Alias: []string{"总结", "概览", "summary"},

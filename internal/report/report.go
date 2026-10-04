@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/Oxen112774/plumb/internal/diagnose"
+	"github.com/Oxen112774/plumb/internal/i18n"
 	"github.com/Oxen112774/plumb/internal/probe"
 )
 
@@ -103,7 +104,7 @@ func Text(w io.Writer, r diagnose.Report, color bool) error {
 			for _, c := range f.Culprits {
 				name := c.Name
 				if c.User != "" {
-					name = fmt.Sprintf("%-18s %s", name, "["+c.User+"]")
+					name = padRight(name, 18) + " " + "[" + c.User + "]"
 				}
 				b.WriteString(fmt.Sprintf("        PID %-7d %s\n", c.PID, name))
 				for _, line := range noteLines(c.Note) {
@@ -119,7 +120,17 @@ func Text(w io.Writer, r diagnose.Report, color bool) error {
 		if len(f.Evidence) > 0 {
 			b.WriteString("\n      " + paint("证据", ansiDim, color) + "\n")
 			for _, e := range f.Evidence {
-				b.WriteString(fmt.Sprintf("        %-18s %s\n", e.Source, e.Detail))
+				// An evidence line is a claim and a number side by side, so a
+				// long one wraps under its own detail rather than running off
+				// the right edge — and the source stays on the first line,
+				// because that is what makes the number checkable.
+				for i, line := range Wrap(e.Detail, 60) {
+					src := ""
+					if i == 0 {
+						src = e.Source
+					}
+					b.WriteString(fmt.Sprintf("        %-18s %s\n", src, line))
+				}
 			}
 		}
 
@@ -210,7 +221,9 @@ func coreLine(cores []probe.CoreLoad) string {
 func overviewLines(r diagnose.Report) []string {
 	var out []string
 
-	if !r.SingleSample {
+	// Only when /proc/stat was actually read: a machine that is running always
+	// accumulates jiffies, so a printed 0.0% would be a lie, not a reading.
+	if r.CPUMeasured {
 		out = append(out, fmt.Sprintf(
 			"CPU      繁忙 %.1f%%   用户 %.1f%%   系统 %.1f%%   等磁盘 %.1f%%   被抢占 %.1f%%",
 			r.CPUUsage.Busy, r.CPUUsage.User, r.CPUUsage.System,
@@ -247,13 +260,82 @@ func overviewLines(r diagnose.Report) []string {
 		out = append(out, line)
 	}
 
-	if r.Pressure.Supported {
-		out = append(out, fmt.Sprintf("压力     cpu some %.2f%%   io full %.2f%%   memory full %.2f%%",
-			r.Pressure.CPU.Some.Avg10,
-			r.Pressure.IO.Full.Avg10,
-			r.Pressure.Memory.Full.Avg10))
+	// The cgroup envelope, when one applies. On a host with no limits the line
+	// is omitted rather than printed as a row of zeros: a summary line that
+	// says nothing is noise, and "no limit" is the uninteresting case.
+	if c := r.Cgroup; c.V2 && (c.CPUQuotaCores > 0 || c.MemoryMaxKB > 0) {
+		var parts []string
+		if c.CPUQuotaCores > 0 {
+			parts = append(parts, fmt.Sprintf("CPU %s（宿主机 %d 核）", c.FormatQuota(), c.HostCores))
+		}
+		if c.MemoryMaxKB > 0 {
+			parts = append(parts, fmt.Sprintf("内存配额 %s，已用 %.1f%%",
+				diagnose.HumanBytes(c.MemoryMaxKB*1024), c.MemoryUsedPercent()))
+		}
+		out = append(out, "限额     "+strings.Join(parts, "   "))
+	}
+	if line := throttleLine(r, i18n.ZH); line != "" {
+		out = append(out, line)
 	}
 
+	if r.Net.Measured && r.Net.OutSegs > 0 {
+		line := fmt.Sprintf("网络     发包 %s 段，重传 %.1f%%",
+			diagnose.HumanCount(r.Net.OutSegs), r.Net.RetransPct)
+		if r.Net.ListenDrops > 0 {
+			line += fmt.Sprintf("，accept 队列丢弃 %d 个连接", r.Net.ListenDrops)
+		}
+		out = append(out, line)
+	}
+
+	out = append(out, pressureLines(r)...)
+	return out
+}
+
+// pressureLines reports the PSI readings the findings were judged by, and the
+// host-wide ones next to them when they differ.
+//
+// Showing only the system numbers would contradict the report above them: on a
+// shared host the machine can be at io full 17% while this cgroup sits at 24%,
+// and a reader who sees 17% in the summary and 24% in the finding has no way
+// to tell which one the verdict came from.
+func pressureLines(r diagnose.Report) []string {
+	parts := func(p probe.Pressure) []string {
+		// Each resource is listed only if its own file was read, so one
+		// unreadable PSI file does not appear as a confident 0.00%.
+		var out []string
+		if p.CPU.HasSome {
+			out = append(out, fmt.Sprintf("cpu some %.2f%%", p.CPU.Some.Avg10))
+		}
+		if p.IO.HasFull {
+			out = append(out, fmt.Sprintf("io full %.2f%%", p.IO.Full.Avg10))
+		}
+		if p.Memory.HasFull {
+			out = append(out, fmt.Sprintf("memory full %.2f%%", p.Memory.Full.Avg10))
+		}
+		return out
+	}
+
+	c := r.Cgroup
+	if !(c.V2 && c.Pressure.Supported) {
+		if p := parts(r.Pressure); len(p) > 0 {
+			// 这个 cgroup 没有自己的 PSI，只能借用节点的；此处必须和判定
+			// 里的说明一致，否则摘要与结论互相矛盾。
+			suffix := ""
+			if c.V2 {
+				suffix = "（节点级，含其他租户）"
+			}
+			return []string{"压力     " + strings.Join(p, "   ") + suffix}
+		}
+		return nil
+	}
+
+	var out []string
+	if p := parts(c.Pressure); len(p) > 0 {
+		out = append(out, "压力     "+strings.Join(p, "   ")+"（本 cgroup）")
+	}
+	if p := parts(r.Pressure); len(p) > 0 {
+		out = append(out, "压力     "+strings.Join(p, "   ")+"（系统级，含其他租户）")
+	}
 	return out
 }
 
@@ -401,6 +483,24 @@ func displayWidth(rs []rune) int {
 		n += runeWidth(r)
 	}
 	return n
+}
+
+// DisplayWidth estimates how many terminal columns s occupies, counting East
+// Asian wide runes as two. Exported so package voice and the -why view agree
+// with this package about what "width" means instead of each keeping its own
+// copy of the table.
+func DisplayWidth(s string) int {
+	return displayWidth([]rune(s))
+}
+
+// padRight pads s to width display columns with spaces. It pads by display
+// width rather than byte count, so a Chinese process name lines up with an
+// ASCII one instead of drifting one column per ideograph.
+func padRight(s string, width int) string {
+	if n := DisplayWidth(s); n < width {
+		return s + strings.Repeat(" ", width-n)
+	}
+	return s
 }
 
 // runeWidth returns the display width of a rune: 2 for CJK and fullwidth

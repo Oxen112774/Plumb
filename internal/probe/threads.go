@@ -29,6 +29,13 @@ type Thread struct {
 	// on a file-system flush". Empty when the thread is running, or when the
 	// kernel refuses the read.
 	WChan string `json:"wchan,omitempty"`
+
+	// Stack is the full kernel call chain, where wchan is only its innermost
+	// frame. It is what separates "waiting on I/O" from "waiting on a
+	// journal commit" from "waiting on an NFS server that is not answering".
+	// Unavailable on kernels built without CONFIG_STACKTRACE, in which case
+	// the wchan answer stands on its own.
+	Stack KernelStack `json:"stack,omitempty"`
 }
 
 // ProcessThreads summarises one process's thread table.
@@ -133,6 +140,7 @@ func readProcessThreads(r Root, pid int) (ProcessThreads, bool) {
 				Comm:  st.Name,
 				State: string(st.State),
 				WChan: readWChan(r, dir+"/"+e.Name()+"/wchan"),
+				Stack: ReadKernelStack(r, dir+"/"+e.Name()+"/stack"),
 			})
 		}
 	}
@@ -214,6 +222,11 @@ func isInterestingPath(target string) bool {
 		if strings.HasPrefix(target, prefix) {
 			return false
 		}
+	}
+	switch target {
+	case "/", "/dev", "/proc", "/sys", "/run":
+		// The directory itself, not a file in it.
+		return false
 	}
 	// A path ending in " (deleted)" is kept deliberately: the file was
 	// unlinked but the process still holds it open, which is itself worth

@@ -5,6 +5,8 @@ import (
 	"math"
 	"strings"
 	"time"
+
+	"github.com/Oxen112774/plumb/internal/i18n"
 )
 
 // Round2 rounds to two decimals, leaving NaN and Inf untouched so a bad
@@ -57,6 +59,73 @@ func HumanRate(bytes uint64, d time.Duration) string {
 		return HumanBytes(bytes)
 	}
 	return HumanBytes(uint64(float64(bytes)/d.Seconds())) + "/s"
+}
+
+// HumanCount formats a bare count with thin thousands separators, e.g. 4.95万
+// for 49500. Segment counts in the tens of millions print unreadably without
+// it, and a number an operator cannot read at a glance is a number they skip.
+func HumanCount(n uint64) string {
+	switch {
+	case n >= 100_000_000:
+		return trimFloat(float64(n)/100_000_000) + " 亿"
+	case n >= 10_000:
+		return trimFloat(float64(n)/10_000) + "万"
+	default:
+		return fmt.Sprintf("%d", n)
+	}
+}
+
+// HumanCountEN is HumanCount for readers who do not count in ten thousands.
+//
+// 万 and 亿 are the units a Chinese reader thinks in; dropping "600万" into an
+// English sentence is not a translation, it is a substitution, and it leaves
+// the reader to convert. An English reader needs the same number in the units
+// they actually use.
+func HumanCountEN(n uint64) string {
+	switch {
+	case n >= 1_000_000_000:
+		return trimFloat(float64(n)/1_000_000_000) + "B"
+	case n >= 1_000_000:
+		return trimFloat(float64(n)/1_000_000) + "M"
+	case n >= 1_000:
+		return trimFloat(float64(n)/1_000) + "K"
+	default:
+		return fmt.Sprintf("%d", n)
+	}
+}
+
+// HumanCountIn picks the counting units for a language.
+func HumanCountIn(n uint64, lang i18n.Lang) string {
+	if lang == i18n.EN {
+		return HumanCountEN(n)
+	}
+	return HumanCount(n)
+}
+
+// HumanDurationEN is HumanDuration without the Chinese unit words.
+func HumanDurationEN(d time.Duration) string {
+	if d <= 0 {
+		return "0s"
+	}
+	days := int(d.Hours()) / 24
+	hours := int(d.Hours()) % 24
+	mins := int(d.Minutes()) % 60
+	switch {
+	case days > 0:
+		return fmt.Sprintf("%dd %dh", days, hours)
+	case hours > 0:
+		return fmt.Sprintf("%dh %dm", hours, mins)
+	default:
+		return fmt.Sprintf("%dm", mins)
+	}
+}
+
+// HumanDurationIn picks the duration rendering for a language.
+func HumanDurationIn(d time.Duration, lang i18n.Lang) string {
+	if lang == i18n.EN {
+		return HumanDurationEN(d)
+	}
+	return HumanDuration(d)
 }
 
 // HumanDuration renders an uptime in the largest two units that matter.

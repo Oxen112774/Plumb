@@ -2,10 +2,12 @@
 //
 // The fixture exists so plumb can be run and its output inspected on a machine
 // that is not Linux — the development machine is Windows. It describes a
-// plausible incident rather than a synthetic one: a database host whose CPU is
-// only about 40% busy while the disk stalls every task on the machine, a
+// plausible incident rather than a synthetic one: a database container whose
+// CPU is only about 40% busy while the disk stalls every task in it, a
 // single-threaded application pinning one core solid, and a hypervisor taking
-// a slice of the CPU on top.
+// a slice of the CPU on top. The container is 2 cores of a 4-core host and
+// 7.5 GiB of an 8 GiB ceiling, so the report has to read /proc against the
+// quota and not against the host.
 //
 // The detail that matters most is invisible to a throughput ranking: mysqld
 // has two threads in D state, stuck on the journal commit. Blocked threads
@@ -160,6 +162,18 @@ type snap struct {
 
 	nginxUTime, nginxSTime, nginxRSS string
 	nginxRead, nginxWrite            string
+
+	netOutSegs, netRetransSegs          string
+	netListenDrops, netListenOverflows  string
+	netSyncookiesFailed, netTCPTimeouts string
+
+	// The container this host really is. /proc describes the host: /proc/stat
+	// lists all four cores, /proc/meminfo reports all of the host's memory.
+	// Only the cgroup files say what this workload was actually given, and
+	// only the cgroup's own PSI says how much of the waiting is ours.
+	cgMemCurrent                  string
+	cgCPUSome, cgIOSome, cgIOFull string
+	cgMemSome, cgMemFull          string
 }
 
 func prevSnap() snap {
@@ -187,6 +201,14 @@ func prevSnap() snap {
 
 		nginxUTime: "300", nginxSTime: "100", nginxRSS: "5000",
 		nginxRead: "50000000", nginxWrite: "10000000",
+
+		netOutSegs: "1000000", netRetransSegs: "5000",
+		netListenDrops: "100", netListenOverflows: "80",
+		netSyncookiesFailed: "12", netTCPTimeouts: "900",
+
+		cgMemCurrent: "7200000",
+		cgCPUSome:    "18.20", cgIOSome: "35.10", cgIOFull: "18.20",
+		cgMemSome: "6.10", cgMemFull: "2.40",
 	}
 }
 
@@ -215,6 +237,19 @@ func curSnap() snap {
 
 		nginxUTime: "308", nginxSTime: "104", nginxRSS: "5000",
 		nginxRead: "50010000", nginxWrite: "10005000",
+
+		// One second later: 6,000,000 segments sent, 180,000 of them
+		// retransmitted (3%), and a dozen connections refused at the accept
+		// queue. None of this shows up in CPU, memory or disk.
+		netOutSegs: "7000000", netRetransSegs: "185000",
+		netListenDrops: "112", netListenOverflows: "90",
+		netSyncookiesFailed: "14", netTCPTimeouts: "930",
+
+		// 7.5 GiB of an 8 GiB ceiling: the container is 93.75% of the way to
+		// an OOM kill, while /proc/meminfo still reports the host's 16 GiB.
+		cgMemCurrent: "8053063680",
+		cgCPUSome:    "24.60", cgIOSome: "44.80", cgIOFull: "24.50",
+		cgMemSome: "9.20", cgMemFull: "3.60",
 	}
 }
 
@@ -265,8 +300,56 @@ Writeback:       %s kB
 			"some avg10=%s avg60=5.20 avg300=2.10 total=2010445\nfull avg10=%s avg60=1.40 avg300=0.60 total=712300\n",
 			v.memSome, v.memFull),
 
+		// --- the network: retransmission, and connections refused outright ---
+		//
+		// Neither leaves a trace in CPU, memory or disk. That is the point of
+		// including them: a machine can lose a packet in twenty while every
+		// other number in the report looks clean.
+		"proc/net/snmp": fmt.Sprintf(`Ip: Forwarding DefaultTTL InReceives InHdrErrors InAddrErrors ForwDatagrams InUnknownProtos InDiscards InDelivers OutRequests OutDiscards OutNoRoutes ReasmTimeout ReasmReqds ReasmOKs ReasmFails FragOKs FragFails FragCreates
+Ip: 2 64 984312004 0 12 0 0 0 984300112 812004551 0 44 0 0 0 0 0 0 0
+Tcp: RtoAlgorithm RtoMin RtoMax MaxConn ActiveOpens PassiveOpens AttemptFails EstabResets CurrEstab InSegs OutSegs RetransSegs InErrs OutRsts InCsumErrors
+Tcp: 1 200 120000 -1 4130452 9820114 12043 33412 412 1900450011 %s %s 3312 41204 0
+Udp: InDatagrams NoPorts InErrors OutDatagrams RcvbufErrors SndbufErrors InCsumErrors IgnoredMulti MemErrors
+Udp: 812004551 12043 0 712004551 0 0 0 4412 0
+`, v.netOutSegs, v.netRetransSegs),
+
+		"proc/net/netstat": fmt.Sprintf(`TcpExt: SyncookiesSent SyncookiesRecv SyncookiesFailed EmbryonicRsts PruneCalled RcvPruned OfoPruned TW TWRecycled TWKilled DelayedACKs DelayedACKLost ListenOverflows ListenDrops TCPHPHits TCPPureAcks TCPHPAcks TCPSackRecovery TCPLostRetransmit TCPFastRetrans TCPSlowStartRetrans TCPTimeouts TCPSpuriousRTOs TCPAbortOnClose TCPAbortOnTimeout TCPMemoryPressures TCPBacklogDrop
+TcpExt: 0 0 %s 412 12043 0 0 812004 0 12 41204 3312 %s %s 812004551 412004510 312004001 12043 3312 44120 12043 %s 12 412 1204 0 0
+IpExt: InNoRoutes InTruncatedPkts InMcastPkts OutMcastPkts InBcastPkts OutBcastPkts InOctets OutOctets InMcastOctets OutMcastOctets InBcastOctets OutBcastOctets InCsumErrors InNoECTPkts InECT1Pkts InECT0Pkts InCEPkts ReasmOverlaps
+IpExt: 0 0 0 0 12043 0 190045001100 812004551000 0 0 441200 0 0 984312004 0 0 0 0
+`, v.netSyncookiesFailed, v.netListenOverflows, v.netListenDrops, v.netTCPTimeouts),
+
+		// --- the cgroup envelope: what this workload was actually given ---
+		//
+		// cpu.max is a 2-core quota on a 4-core host and memory.max is 8 GiB
+		// on a host with 16. /proc cannot say either: inside a container it
+		// reports the host, which is the whole reason these files are read.
+		// The per-cgroup PSI beside them is the waiting that is *ours*, next
+		// to the host-wide /proc/pressure, which counts everyone's.
+		"sys/fs/cgroup/cpu.max":        "200000 100000\n",
+		"sys/fs/cgroup/memory.max":     "8589934592\n",
+		"sys/fs/cgroup/memory.current": v.cgMemCurrent + "\n",
+		// oom_kill is history, not a rate, so it reads the same in both
+		// samples: this container has already lost a process once.
+		"sys/fs/cgroup/memory.events": `low 0
+high 41
+max 0
+oom 1
+oom_kill 1
+`,
+		"sys/fs/cgroup/cpu.pressure": fmt.Sprintf(
+			"some avg10=%s avg60=15.40 avg300=8.20 total=2210445\n", v.cgCPUSome),
+
+		"sys/fs/cgroup/io.pressure": fmt.Sprintf(
+			"some avg10=%s avg60=33.10 avg300=19.80 total=9410122\nfull avg10=%s avg60=18.30 avg300=9.10 total=5310455\n",
+			v.cgIOSome, v.cgIOFull),
+
+		"sys/fs/cgroup/memory.pressure": fmt.Sprintf(
+			"some avg10=%s avg60=6.20 avg300=3.10 total=1810445\nfull avg10=%s avg60=2.40 avg300=1.10 total=612300\n",
+			v.cgMemSome, v.cgMemFull),
+
 		// --- the database: the block-I/O culprit, not the CPU or memory one ---
-		"proc/1234/stat":    statLine(1234, "mysqld", 'S', v.mysqlUTime, v.mysqlSTime, "0", 6, v.mysqlRSS, "120"),
+		"proc/1234/stat":    statLine(1234, "mysqld", 'S', v.mysqlUTime, v.mysqlSTime, "0", 6, v.mysqlRSS, "120", "2"),
 		"proc/1234/status":  statusBlock("mysqld", 1234, 113, 6),
 		"proc/1234/cmdline": "/usr/sbin/mysqld\x00--defaults-file=/etc/mysql/my.cnf",
 		"proc/1234/io": fmt.Sprintf(`rchar: %s
@@ -281,17 +364,56 @@ cancelled_write_bytes: 0
 		// Two of mysqld's threads are in D state on the journal commit. They
 		// move almost no data while blocked, which is exactly why a
 		// throughput ranking cannot find them.
-		"proc/1234/task/1234/stat":  statLine(1234, "mysqld", 'S', "900", "240", "0", 6, "620000", "120"),
-		"proc/1234/task/1240/stat":  statLine(1240, "mysqld", 'D', "300", "60", "3", 6, "40000", "8900"),
-		"proc/1234/task/1241/stat":  statLine(1241, "mysqld", 'D', "280", "55", "2", 6, "38000", "6400"),
-		"proc/1234/task/1242/stat":  statLine(1242, "mysqld", 'S', "90", "12", "0", 6, "1200", "40"),
-		"proc/1234/task/1243/stat":  statLine(1243, "mysqld", 'S', "40", "6", "0", 6, "600", "20"),
-		"proc/1234/task/1244/stat":  statLine(1244, "mysqld", 'S', "5", "1", "0", 6, "200", "0"),
+		"proc/1234/task/1234/stat":  statLine(1234, "mysqld", 'S', "900", "240", "0", 6, "620000", "120", "2"),
+		"proc/1234/task/1240/stat":  statLine(1240, "mysqld", 'D', "300", "60", "3", 6, "40000", "8900", "3"),
+		"proc/1234/task/1241/stat":  statLine(1241, "mysqld", 'D', "280", "55", "2", 6, "38000", "6400", "1"),
+		"proc/1234/task/1242/stat":  statLine(1242, "mysqld", 'S', "90", "12", "0", 6, "1200", "40", "0"),
+		"proc/1234/task/1243/stat":  statLine(1243, "mysqld", 'S', "40", "6", "0", 6, "600", "20", "1"),
+		"proc/1234/task/1244/stat":  statLine(1244, "mysqld", 'S', "5", "1", "0", 6, "200", "0", "2"),
 		"proc/1234/task/1240/wchan": "jbd2_log_wait_commit\n",
 		"proc/1234/task/1241/wchan": "io_schedule\n",
 
+		// Kernel stacks. These are the reason "io_schedule" in the two wchan
+		// lines above is not the answer: io_schedule is where every block-I/O
+		// wait bottoms out, so it names almost nothing. The stack names the
+		// subsystem that decided to wait, and the three here are deliberately
+		// three different subsystems with three incompatible remedies.
+		//
+		// 1240 agrees with its wchan: a journal commit.
+		"proc/1234/task/1240/stack": `[<0>] __schedule+0x2d5/0x890
+[<0>] schedule+0x33/0xa0
+[<0>] io_schedule+0x42/0x70
+[<0>] wait_on_page_bit+0x113/0x1f0
+[<0>] jbd2_log_wait_commit+0xbb/0x140
+[<0>] jbd2_journal_stop+0x1f8/0x2c0
+[<0>] __ext4_journal_stop+0x38/0xa0
+[<0>] ext4_sync_file+0x1d2/0x3d0
+[<0>] vfs_fsync_range+0x45/0xa0
+[<0>] do_fsync+0x3d/0x70
+[<0>] __x64_sys_fsync+0x14/0x20
+[<0>] do_syscall_64+0x5c/0x90
+`,
+		// 1241 is the case the stack exists for. wchan says io_schedule —
+		// useless. The stack says NFS: this machine is waiting on a server
+		// that is not answering, and restarting it would accomplish nothing.
+		"proc/1234/task/1241/stack": `[<0>] __schedule+0x2d5/0x890
+[<0>] schedule+0x33/0xa0
+[<0>] io_schedule+0x42/0x70
+[<0>] __wait_on_bit+0x3c/0xa0
+[<0>] nfs_wait_bit_killable+0x1a/0x60
+[<0>] nfs_pageio_doio+0x1c9/0x3a0
+[<0>] nfs_generic_pg_pgios+0x11f/0x1f0
+[<0>] nfs_do_readpage+0x8b/0x120
+[<0>] nfs_readpages+0x18a/0x230
+[<0>] read_pages+0x66/0x1c0
+[<0>] __do_page_cache_readahead+0x1d5/0x240
+[<0>] filemap_fault+0x4c1/0x8f0
+`,
+
 		// --- the application: nominal I/O, by far the largest resident set ---
-		"proc/3000/stat":    statLine(3000, "node", 'R', v.nodeUTime, v.nodeSTime, "12", 3, v.nodeRSS, "60"),
+		// lastCPU 0: this is the process pinning core 0, and the field is what
+		// lets the report name it rather than guess.
+		"proc/3000/stat":    statLine(3000, "node", 'R', v.nodeUTime, v.nodeSTime, "12", 3, v.nodeRSS, "60", "0"),
 		"proc/3000/status":  statusBlock("node", 3000, 1000, 3),
 		"proc/3000/cmdline": "node\x00/home/app/server.js\x00--port=8080",
 		"proc/3000/io": fmt.Sprintf(`rchar: 400000000
@@ -306,13 +428,31 @@ cancelled_write_bytes: 0
 		// The main thread is runnable: this is the process pinning core 0.
 		// A second thread is stuck faulting a page back in from disk, which
 		// is what memory pressure looks like from inside a process.
-		"proc/3000/task/3000/stat":  statLine(3000, "node", 'R', "8000", "2000", "0", 3, "1150000", "0"),
-		"proc/3000/task/3001/stat":  statLine(3001, "node", 'D', "120", "30", "8", 3, "30000", "2200"),
-		"proc/3000/task/3002/stat":  statLine(3002, "node", 'S', "60", "24", "0", 3, "18000", "30"),
+		"proc/3000/task/3000/stat":  statLine(3000, "node", 'R', "8000", "2000", "0", 3, "1150000", "0", "0"),
+		"proc/3000/task/3001/stat":  statLine(3001, "node", 'D', "120", "30", "8", 3, "30000", "2200", "2"),
+		"proc/3000/task/3002/stat":  statLine(3002, "node", 'S', "60", "24", "0", 3, "18000", "30", "1"),
 		"proc/3000/task/3001/wchan": "filemap_fault\n",
+		// The other case the stack exists for: wchan says filemap_fault,
+		// which reads like "a page had to come back from disk". The stack
+		// shows the fault is inside a cgroup reclaim — the container's limit
+		// is too small, not the disk too slow.
+		"proc/3000/task/3001/stack": `[<0>] __schedule+0x2d5/0x890
+[<0>] schedule+0x33/0xa0
+[<0>] io_schedule+0x42/0x70
+[<0>] wait_on_page_bit+0x113/0x1f0
+[<0>] shrink_page_list+0x8f3/0xc50
+[<0>] shrink_inactive_list+0x2a1/0x5e0
+[<0>] shrink_node_memcg+0x37c/0x7c0
+[<0>] shrink_node+0xaa/0x2f0
+[<0>] do_try_to_free_pages+0xda/0x420
+[<0>] try_to_free_mem_cgroup_pages+0xe6/0x2c0
+[<0>] mem_cgroup_try_charge+0x1a4/0x2c0
+[<0>] handle_mm_fault+0xc9a/0x14f0
+[<0>] filemap_fault+0x4c1/0x8f0
+`,
 
 		// --- the reverse proxy: nothing blocked, and it should say so ---
-		"proc/2048/stat":    statLine(2048, "nginx", 'S', v.nginxUTime, v.nginxSTime, "0", 4, v.nginxRSS, "20"),
+		"proc/2048/stat":    statLine(2048, "nginx", 'S', v.nginxUTime, v.nginxSTime, "0", 4, v.nginxRSS, "20", "1"),
 		"proc/2048/status":  statusBlock("nginx", 2048, 33, 4),
 		"proc/2048/cmdline": "nginx:\x00worker\x00process",
 		"proc/2048/io": fmt.Sprintf(`rchar: 900000000
@@ -324,10 +464,10 @@ write_bytes: %s
 cancelled_write_bytes: 0
 `, v.nginxRead, v.nginxWrite),
 
-		"proc/2048/task/2048/stat": statLine(2048, "nginx", 'S', "200", "60", "0", 4, "3000", "20"),
-		"proc/2048/task/2049/stat": statLine(2049, "nginx", 'S', "60", "24", "0", 4, "1200", "5"),
-		"proc/2048/task/2050/stat": statLine(2050, "nginx", 'S', "30", "12", "0", 4, "900", "3"),
-		"proc/2048/task/2051/stat": statLine(2051, "nginx", 'S', "10", "4", "0", 4, "600", "2"),
+		"proc/2048/task/2048/stat": statLine(2048, "nginx", 'S', "200", "60", "0", 4, "3000", "20", "1"),
+		"proc/2048/task/2049/stat": statLine(2049, "nginx", 'S', "60", "24", "0", 4, "1200", "5", "2"),
+		"proc/2048/task/2050/stat": statLine(2050, "nginx", 'S', "30", "12", "0", 4, "900", "3", "3"),
+		"proc/2048/task/2051/stat": statLine(2051, "nginx", 'S', "10", "4", "0", 4, "600", "2", "0"),
 
 		// --- open descriptors ---
 		//
@@ -364,7 +504,12 @@ cancelled_write_bytes: 0
 // parser that reads field 42, a positional format is one typo away from
 // silently shifting every field after it, which is the class of bug that
 // produces a plausible wrong number rather than a failure.
-func statLine(id int, comm string, state byte, utime, stime, majflt string, threads int, rss, blkio string) string {
+//
+// lastCPU is field 39, the core the task last ran on. It is written out
+// explicitly for every task rather than left at the "0" the other unused
+// fields default to: a fixture whose meaning depends on a default is a fixture
+// that would keep passing if the reader of that field broke.
+func statLine(id int, comm string, state byte, utime, stime, majflt string, threads int, rss, blkio, lastCPU string) string {
 	var f [52]string
 	for i := range f {
 		f[i] = "0"
@@ -390,6 +535,7 @@ func statLine(id int, comm string, state byte, utime, stime, majflt string, thre
 	set(24, rss)                    // rss
 	set(25, "18446744073709551615") // rsslim
 	set(38, "17")                   // exit_signal
+	set(39, lastCPU)                // processor: last core this task ran on
 	set(42, blkio)                  // delayacct_blkio_ticks
 
 	return strings.Join(f[:], " ") + "\n"

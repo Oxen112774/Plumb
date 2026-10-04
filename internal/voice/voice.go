@@ -35,8 +35,18 @@ import (
 	"strings"
 
 	"github.com/Oxen112774/plumb/internal/diagnose"
+	"github.com/Oxen112774/plumb/internal/i18n"
 	"github.com/Oxen112774/plumb/internal/report"
 )
+
+// pick is the language switch for this package's strings. The two renderings
+// sit side by side so an edit to one without the other is visible in the diff.
+func pick(lang i18n.Lang, zh, en string) string {
+	if lang == i18n.EN {
+		return en
+	}
+	return zh
+}
 
 // width is the column budget for body text. It matches the report so the two
 // outputs sit in the same terminal without one looking like it came from a
@@ -130,48 +140,137 @@ var scripts = map[string]script{
 		situation: "脏页堆起来了 —— 内核快要被迫同步刷盘，那一瞬间所有写都会卡住几秒。",
 		first:     "找出写入突增的进程。是正常业务量就调低 vm.dirty_ratio。",
 	},
+	"网络": {
+		situation: "网络在丢包重传，或把连接挡在门外 —— 慢的可能不是这台机器。",
+		first:     "accept 队列在丢连接就是应用收不过来，先看 ss -lnt；只是重传高，就查链路和网卡，别改这台机器的参数。",
+	},
+	"内存配额": {
+		situation: "cgroup 内存配额快满了 —— 到顶不是变慢，是 OOM kill。",
+		first:     "先看是谁在涨。配额到顶内核直接杀进程，不会商量：先调限额或堵泄漏。",
+	},
+}
+
+// scriptsEN is the same table keyed by the English area names, which is what
+// a report built in English carries. The two tables are keyed by the strings
+// diagnose actually emits in each language; a shared key would mean the
+// English report fell through to the fallback paragraph silently.
+var scriptsEN = map[string]script{
+	"disk I/O": {
+		situation: "It is the disk: not a broken one — the flush queue is full and writes are queueing behind it.",
+		first:     "Do not restart yet: the current state is the only thing that can tell you why. Use pidstat -d 1 to see who is writing.",
+	},
+	"memory": {
+		situation: "Memory is short and the system is spending time reclaiming — reclaim is what stalls, not your program.",
+		first:     "Cap the working set of the largest resident process first. If you cannot, add memory.",
+	},
+	"blocked threads": {
+		situation: "Some threads are held by the kernel: not working, and not killable.",
+		first:     "Stop killing them — D state hangs until the I/O returns. Look at which kernel function it is parked in and which file it holds.",
+	},
+	"CPU": {
+		situation: "CPU is the bottleneck; the machine genuinely is busy.",
+		first:     "Look at who is eating CPU below. High softirq means packet processing, not your code.",
+	},
+	"CPU stolen": {
+		situation: "The hypervisor took the CPU — whatever took it is not in your program.",
+		first:     "Nothing you tune in this machine will get it back. Change the instance type, or ask the provider for the oversubscription ratio.",
+	},
+	"swap": {
+		situation: "Swap is in real use — a certain signal that memory ran short.",
+		first:     "Find the process whose working set exceeds physical memory. Paging raises latency by an order of magnitude.",
+	},
+	"one core saturated": {
+		situation: "One core is full and the rest are idle — this is not a shortage of CPU.",
+		first:     "Do not add cores: it does nothing for this shape. What has to change is the concurrency model.",
+	},
+	"disk space": {
+		situation: "The disk is filling up. This one has a timetable — you can work out how long is left.",
+		first:     "Clear logs and temporary files first. When writes fail the machine does not get slower, it errors.",
+	},
+	"dirty pages": {
+		situation: "Dirty pages have piled up — the kernel is about to flush synchronously, and for a moment every write blocks for seconds.",
+		first:     "Find the process whose writes spiked. If the volume is legitimate, lower vm.dirty_ratio.",
+	},
+	"network": {
+		situation: "The network is losing packets and retransmitting, or turning connections away — the slow thing may not be this machine.",
+		first:     "A dropping accept queue means the application cannot keep up; look at ss -lnt. If it is only retransmission, check the path and the NIC — do not tune this machine's parameters.",
+	},
+	"memory quota": {
+		situation: "The cgroup memory quota is nearly full — hitting it is not slowness, it is an OOM kill.",
+		first:     "Find what is growing first. At the limit the kernel kills a process without negotiating: raise the limit or plug the leak.",
+	},
 }
 
 // fallback is used for an area that has no script. A finding the message has no
 // words for still gets reported; it just gets reported plainly.
-var fallback = script{
-	situation: "这一条值得看一眼。",
-	first:     "先看完整报告里这一条的证据，再决定要不要动。",
-}
+var (
+	fallback = script{
+		situation: "这一条值得看一眼。",
+		first:     "先看完整报告里这一条的证据，再决定要不要动。",
+	}
+	fallbackEN = script{
+		situation: "This one is worth a look.",
+		first:     "Read the evidence for it in the full report before deciding whether to act.",
+	}
+)
 
 // urgency is deliberately blunt about time. "建议关注一下" would be softer and
 // useless: the reader is trying to decide whether to get out of bed.
-var urgency = map[diagnose.Severity]string{
-	diagnose.SeverityCritical: "现在就在影响线上，别等它自己好。",
-	diagnose.SeverityWarning:  "现在还不致命，但在往坏的方向走 —— 今天之内处理掉。",
-	diagnose.SeverityWatch:    "不用马上动手，先记住；连着几天都在就不是巧合。",
-	diagnose.SeverityInfo:     "只是记录，不用动手。",
-}
+var (
+	urgency = map[diagnose.Severity]string{
+		diagnose.SeverityCritical: "现在就在影响线上，别等它自己好。",
+		diagnose.SeverityWarning:  "现在还不致命，但在往坏的方向走 —— 今天之内处理掉。",
+		diagnose.SeverityWatch:    "不用马上动手，先记住；连着几天都在就不是巧合。",
+		diagnose.SeverityInfo:     "只是记录，不用动手。",
+	}
+	urgencyEN = map[diagnose.Severity]string{
+		diagnose.SeverityCritical: "This is affecting production now. Do not wait for it to clear on its own.",
+		diagnose.SeverityWarning:  "Not fatal yet, but it is heading that way — deal with it today.",
+		diagnose.SeverityWatch:    "Nothing to do right now; make a note. If it is still there in a few days it is not a coincidence.",
+		diagnose.SeverityInfo:     "Recorded only. No action needed.",
+	}
+)
 
-const stance = "我只读了 /proc，没动你的系统 —— 上面每一句都能自己去核。"
+const (
+	stance   = "我只读了 /proc，没动你的系统 —— 上面每一句都能自己去核。"
+	stanceEN = "I only read /proc and changed nothing — every line above is something you can check yourself."
+)
 
 // Compose builds the message for a report.
-func Compose(r diagnose.Report) Message {
-	worst := r.Worst()
-	m := Message{Stance: stance, Severity: worst.Severity}
+func Compose(r diagnose.Report, lang i18n.Lang) Message {
+	worst := r.Worst(lang)
+	m := Message{Stance: pick(lang, stance, stanceEN), Severity: worst.Severity}
 
 	if !r.HasProblems() {
-		m.Situation = "现在没事 —— 没有需要你半夜起来的东西。"
+		m.Situation = pick(lang,
+			"现在没事 —— 没有需要你半夜起来的东西。",
+			"Nothing right now — there is no reason to get out of bed for this.")
 		if len(r.Findings) > 0 {
-			m.Others = "有几条只记录、不需要动手的观察。"
+			m.Others = pick(lang,
+				"有几条只记录、不需要动手的观察。",
+				"There are a few observations recorded that need no action.")
 		}
 		return m
 	}
 
 	s, ok := scripts[worst.Area]
+	if lang == i18n.EN {
+		s, ok = scriptsEN[worst.Area]
+	}
 	if !ok {
 		s = fallback
+		if lang == i18n.EN {
+			s = fallbackEN
+		}
 	}
 	m.Situation = s.situation
 	m.First = s.first
-	m.Facts = factLines(worst)
+	m.Facts = factLines(worst, lang)
 	m.Urgency = urgency[worst.Severity]
-	m.Others = othersLine(r, worst)
+	if lang == i18n.EN {
+		m.Urgency = urgencyEN[worst.Severity]
+	}
+	m.Others = othersLine(r, worst, lang)
 	return m
 }
 
@@ -181,7 +280,7 @@ func Compose(r diagnose.Report) Message {
 // were built, so the message cannot disagree with the report it summarises: if
 // they ever did, the report would be right and the reassuring sentence would be
 // the lie.
-func factLines(f diagnose.Finding) []string {
+func factLines(f diagnose.Finding, lang i18n.Lang) []string {
 	var out []string
 	if f.Headline != "" {
 		out = append(out, f.Headline)
@@ -191,20 +290,21 @@ func factLines(f diagnose.Finding) []string {
 	}
 
 	c := f.Culprits[0]
-	detail, held := splitNote(c.Note)
+	detail, held := splitNote(c.Note, lang)
 
-	line := fmt.Sprintf("元凶 %s（PID %d）", c.Name, c.PID)
+	line := pick(lang, "元凶 %s（PID %d）", "culprit %s (PID %d)")
+	line = fmt.Sprintf(line, c.Name, c.PID)
 	if detail != "" {
-		line += "：" + strings.TrimSuffix(detail, "。")
+		line += pick(lang, "：", ": ") + strings.TrimSuffix(detail, "。")
 	}
-	line += "。"
+	line += pick(lang, "。", ".")
 	if n := len(f.Culprits) - 1; n > 0 {
-		line += fmt.Sprintf("另有 %d 个在干同一件事。", n)
+		line += fmt.Sprintf(pick(lang, "另有 %d 个在干同一件事。", " %d more are doing the same thing."), n)
 	}
 	out = append(out, line)
 
 	if held != "" {
-		out = append(out, "它手里拿着 "+held+"。")
+		out = append(out, fmt.Sprintf(pick(lang, "它手里拿着 %s。", "It holds %s."), held))
 	}
 	return out
 }
@@ -216,7 +316,8 @@ func factLines(f diagnose.Finding) []string {
 // blocked thread, then a header, then one line per held file. Inline, the
 // newlines have to become punctuation, and a file list has to stay a list — so
 // the two halves are returned separately rather than flattened together.
-func splitNote(note string) (detail, held string) {
+func splitNote(note string, lang i18n.Lang) (detail, held string) {
+	header := diagnose.HeldFilesHeaderFor(lang)
 	var inline, files []string
 	seenHeader := false
 	for _, raw := range strings.Split(note, "\n") {
@@ -225,7 +326,7 @@ func splitNote(note string) (detail, held string) {
 			continue
 		}
 		switch {
-		case line == diagnose.HeldFilesHeader:
+		case line == header:
 			seenHeader = true
 		case seenHeader:
 			files = append(files, line)
@@ -239,7 +340,7 @@ func splitNote(note string) (detail, held string) {
 	if len(inline) > 0 {
 		detail = inline[0]
 		if n := len(inline) - 1; n > 0 {
-			detail += fmt.Sprintf("，另有 %d 个也在等", n)
+			detail += fmt.Sprintf(pick(lang, "，另有 %d 个也在等", ", %d more also waiting"), n)
 		}
 	}
 	switch len(files) {
@@ -247,7 +348,7 @@ func splitNote(note string) (detail, held string) {
 	case 1:
 		held = files[0]
 	default:
-		held = fmt.Sprintf("%s 等 %d 个文件", files[0], len(files))
+		held = fmt.Sprintf(pick(lang, "%s 等 %d 个文件", "%s and %d other files"), files[0], len(files))
 	}
 	return detail, held
 }
@@ -256,7 +357,7 @@ func splitNote(note string) (detail, held string) {
 //
 // Named, not elaborated: six more paragraphs is how a 2am message stops being
 // read. Whoever wants the detail runs plumb without -voice.
-func othersLine(r diagnose.Report, worst diagnose.Finding) string {
+func othersLine(r diagnose.Report, worst diagnose.Finding, lang i18n.Lang) string {
 	var names []string
 	for _, f := range r.Findings {
 		if f.Area == worst.Area {
@@ -267,7 +368,10 @@ func othersLine(r diagnose.Report, worst diagnose.Finding) string {
 	if len(names) == 0 {
 		return ""
 	}
-	return fmt.Sprintf("另有 %d 项：%s。", len(names), strings.Join(names, "、"))
+	return fmt.Sprintf(pick(lang,
+		"另有 %d 项：%s。",
+		"There are %d more: %s."),
+		len(names), strings.Join(names, pick(lang, "、", ", ")))
 }
 
 // Write renders the message.
@@ -277,8 +381,8 @@ func othersLine(r diagnose.Report, worst diagnose.Finding) string {
 // invents a number — degrades to exactly the text this function would have
 // produced anyway. A failure is reported on stderr rather than in the message:
 // what a model did is not part of the diagnosis.
-func Write(w io.Writer, r diagnose.Report, color bool, model *Model) error {
-	m := Compose(r)
+func Write(w io.Writer, r diagnose.Report, color bool, model *Model, lang i18n.Lang) error {
+	m := Compose(r, lang)
 	if model != nil {
 		if p, err := model.ParagraphFor(Digest(r)); err == nil {
 			m.Advice = p
@@ -296,12 +400,12 @@ func Write(w io.Writer, r diagnose.Report, color bool, model *Model) error {
 	if r.System.Hostname != "" {
 		b.WriteString(paint(" · "+r.System.Hostname, ansiDim, color))
 	}
-	b.WriteString(" · " + paint(m.Severity.Label(), severityColor(m.Severity), color))
+	b.WriteString(" · " + paint(m.Severity.Label(lang), severityColor(m.Severity), color))
 	b.WriteString(paint(" · "+r.StartedAt.Format("2006-01-02 15:04:05"), ansiDim, color))
 	b.WriteString("\n\n")
 
 	if m.Advice != "" {
-		b.WriteString(paint("〔模型综合〕", ansiDim, color))
+		b.WriteString(paint(pick(lang, "〔模型综合〕", "[model synthesis]"), ansiDim, color))
 		b.WriteString("\n")
 		paragraph(&b, m.Advice, color)
 	}
@@ -318,7 +422,7 @@ func Write(w io.Writer, r diagnose.Report, color bool, model *Model) error {
 
 	// What to do, and whether it has to be now.
 	if m.First != "" {
-		paragraph(&b, joinAll([]string{m.First, m.Urgency}), color)
+		paragraph(&b, joinAll([]string{m.First, m.Urgency}, lang), color)
 	}
 
 	// The footer: what else is there, and what plumb did not do. No blank line
@@ -335,7 +439,13 @@ func Write(w io.Writer, r diagnose.Report, color bool, model *Model) error {
 // a sentence. Run together with the next fact it produced
 // "…都在等它最直接的是 mysqld", so the join supplies the punctuation the
 // heading did not have.
-func joinAll(parts []string) string {
+func joinAll(parts []string, lang i18n.Lang) string {
+	stops := "。！？；："
+	gap := ""
+	if lang == i18n.EN {
+		stops = ".!?:;"
+		gap = " "
+	}
 	out := ""
 	for _, p := range parts {
 		if p == "" {
@@ -345,10 +455,10 @@ func joinAll(parts []string) string {
 			out = p
 			continue
 		}
-		if r := []rune(out); !strings.ContainsRune("。！？；：", r[len(r)-1]) {
-			out += "。"
+		if r := []rune(out); !strings.ContainsRune(stops, r[len(r)-1]) {
+			out += pick(lang, "。", ".")
 		}
-		out += p
+		out += gap + p
 	}
 	return out
 }
@@ -413,16 +523,24 @@ func StateOf(r diagnose.Report) State {
 
 // Change describes what moved between two observations, or returns "" when
 // nothing did.
-func Change(prev, cur State) string {
-	var appeared, worsened, cleared []string
+func Change(prev, cur State, lang i18n.Lang) string {
+
+	var appeared, worsened, improved, cleared []string
 
 	for area, sev := range cur {
 		old, seen := prev[area]
 		switch {
 		case !seen:
-			appeared = append(appeared, fmt.Sprintf("%s（%s）", area, sev.Label()))
+			appeared = append(appeared, fmt.Sprintf(pick(lang, "%s（%s）", "%s (%s)"), area, sev.Label(lang)))
 		case sev.Rank() < old.Rank():
-			worsened = append(worsened, fmt.Sprintf("%s %s → %s", area, old.Label(), sev.Label()))
+			worsened = append(worsened, fmt.Sprintf(pick(lang, "%s %s → %s", "%s %s → %s"),
+				area, old.Label(lang), sev.Label(lang)))
+		case sev.Rank() > old.Rank():
+			// A finding that eased off is still a change: someone watching for
+			// bad news should be told the news got better, not made to wait
+			// until it disappears entirely.
+			improved = append(improved, fmt.Sprintf(pick(lang, "%s %s → %s", "%s %s → %s"),
+				area, old.Label(lang), sev.Label(lang)))
 		}
 	}
 	for area := range prev {
@@ -433,19 +551,26 @@ func Change(prev, cur State) string {
 
 	sort.Strings(appeared)
 	sort.Strings(worsened)
+	sort.Strings(improved)
 	sort.Strings(cleared)
 
+	joiner := pick(lang, "、", ", ")
+	sep := pick(lang, "；", "; ")
 	var parts []string
 	if len(appeared) > 0 {
-		parts = append(parts, "新出现 "+strings.Join(appeared, "、"))
+		parts = append(parts, pick(lang, "新出现 ", "appeared ")+strings.Join(appeared, joiner))
 	}
 	if len(worsened) > 0 {
-		parts = append(parts, "变严重 "+strings.Join(worsened, "、"))
+		parts = append(parts, pick(lang, "变严重 ", "worsened ")+strings.Join(worsened, joiner))
+	}
+	if len(improved) > 0 {
+		parts = append(parts, pick(lang, "已经好转 ", "improved ")+strings.Join(improved, joiner))
 	}
 	if len(cleared) > 0 {
-		parts = append(parts, "已经好了 "+strings.Join(cleared, "、"))
+		parts = append(parts, pick(lang, "已经好了 ", "cleared ")+strings.Join(cleared, joiner))
 	}
-	return strings.Join(parts, "；")
+
+	return strings.Join(parts, sep)
 }
 
 // --- colour ---

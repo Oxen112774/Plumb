@@ -24,7 +24,7 @@ func TestEveryLeafIsWellFormed(t *testing.T) {
 			continue
 		}
 		switch l.Kind {
-		case KindWChan, KindArea, KindProc:
+		case KindWChan, KindArea, KindProc, KindStack:
 		default:
 			t.Errorf("%s: invalid kind %d", l.Key, l.Kind)
 		}
@@ -147,6 +147,32 @@ func TestUncertainLeavesExplainThemselves(t *testing.T) {
 		}
 		if l.Confidence != Certain && l.Confidence.Note() == "" {
 			t.Errorf("%s: confidence %s has no note to print", l.Key, l.Confidence)
+		}
+	}
+}
+
+// Kinds must name every kind the tree actually holds.
+//
+// The catalogue ranges over Kinds, so a kind that gets added to the tree and
+// forgotten there does not fail anywhere: it simply does not get listed, and
+// leaves that exist in `-why <key>` are missing from the page whose whole job
+// is to say what is in the tree. This is the test that turns that silence into
+// a failure.
+func TestKindsCoverTheTree(t *testing.T) {
+	listed := make(map[Kind]bool, len(Kinds()))
+	for _, k := range Kinds() {
+		if listed[k] {
+			t.Errorf("kind %s is listed twice", k)
+		}
+		listed[k] = true
+		if k.String() == "未知类别" {
+			t.Errorf("kind %d has no String case", int(k))
+		}
+	}
+	for _, l := range All() {
+		if !listed[l.Kind] {
+			t.Errorf("%s: kind %s (%d) is in the tree but not in Kinds()",
+				l.Key, l.Kind, int(l.Kind))
 		}
 	}
 }

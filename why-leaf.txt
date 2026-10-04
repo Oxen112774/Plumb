@@ -1,4 +1,4 @@
-balance_dirty_pages · 内核等待点 · 可信度：有依据
+balance_dirty_pages · 内核等待点 · 可信度: 有依据
 
 它是什么
   写入者被内核按住，等脏页降到限以下。

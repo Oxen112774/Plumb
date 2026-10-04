@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/Oxen112774/plumb/internal/diagnose"
+	"github.com/Oxen112774/plumb/internal/i18n"
 )
 
 // Model is an optional language model that reads a whole diagnosis and writes
@@ -131,7 +132,7 @@ func Digest(r diagnose.Report) string {
 	fmt.Fprintf(&b, "主机 %s，%d 核，load1 %.2f\n",
 		name, r.System.Cores, r.System.Load[0])
 
-	if !r.SingleSample {
+	if r.CPUMeasured {
 		fmt.Fprintf(&b, "CPU 繁忙 %.1f%%，等磁盘 %.1f%%，被抢占 %.1f%%，空闲 %.1f%%\n",
 			r.CPUUsage.Busy, r.CPUUsage.IOWait, r.CPUUsage.Steal, r.CPUUsage.Idle)
 	}
@@ -162,7 +163,7 @@ func Digest(r diagnose.Report) string {
 
 	b.WriteString("判定：\n")
 	for _, f := range r.Findings {
-		fmt.Fprintf(&b, "- %s（%s）：%s\n", f.Area, f.Severity.Label(), f.Headline)
+		fmt.Fprintf(&b, "- %s（%s）：%s\n", f.Area, f.Severity.Label(i18n.ZH), f.Headline)
 		for _, c := range f.Culprits {
 			fmt.Fprintf(&b, "  进程 %s PID %d", c.Name, c.PID)
 			if c.User != "" {

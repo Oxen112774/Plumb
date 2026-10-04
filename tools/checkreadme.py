@@ -11,16 +11,28 @@ actually wrong.
 """
 
 import io
+import re
 import sys
 
 # The marker is a line that appears only in this block's output, and the file is
 # the capture it must match.
 BLOCKS = [
-    ("plumb · 服务器卡顿归因", "demo.txt"),
+    ("plumb │ prod-db-01 │ Linux", "demo.txt"),
     ("plumb · prod-db-01 · 严重", "voice.txt"),
     ("不确定的地方，每一片里都写着", "why.txt"),
-    ("balance_dirty_pages · 内核等待点 · 可信度：有依据", "why-leaf.txt"),
+    ("balance_dirty_pages · 内核等待点 · 可信度: 有依据", "why-leaf.txt"),
 ]
+
+# The sample time is the one thing in a capture that is not plumb's behaviour:
+# it is whatever the clock said when the block was last refreshed. Without this
+# rule every re-capture fails on a date and the reader has to edit a timestamp
+# by hand to get a green run — which trains them to stop running the check.
+TIMESTAMP = re.compile(r"\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}")
+
+
+def normalise(line):
+    """Blank out wall-clock times, which differ on every run."""
+    return TIMESTAMP.sub("<time>", line)
 
 
 def fenced_blocks(text):
@@ -47,9 +59,10 @@ def check(block, lines):
             # Blank lines are layout the README is free to adjust, and letting an
             # empty line match would advance the cursor over a real one.
             continue
+        wanted = normalise(line)
         found = None
         for i in range(start, len(lines)):
-            if lines[i] == line:
+            if normalise(lines[i]) == wanted:
                 found = i
                 break
         if found is None:

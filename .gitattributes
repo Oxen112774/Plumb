@@ -1,3 +1,42 @@
 # The tool runs on Linux; keep the working tree LF everywhere so a clone on a
 # Linux host and one on Windows are byte-identical.
 * text=auto eol=lf
+
+# Binary files get no conversion at all. Naming them explicitly matters
+# because text=auto guesses from content, and a file that happens to look
+# text-like (a tiny PNG, a fixture) would otherwise be rewritten.
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.pdf binary
+*.zip binary
+*.gz binary
+*.exe binary
+*.dll binary
+*.so binary
+*.a binary
+*.o binary
+*.test binary
+
+# Windows scripts must stay CRLF or cmd.exe treats them as binary and
+# silently skips them. Everything else is LF.
+*.bat text eol=crlf
+*.cmd text eol=crlf
+*.ps1 text eol=crlf
+
+# Spell out the text types this repo actually contains, so the intent is
+# readable and a new contributor does not have to know what text=auto does.
+*.go text eol=lf
+*.mod text eol=lf
+*.sum text eol=lf
+*.md text eol=lf
+*.txt text eol=lf
+*.yml text eol=lf
+*.yaml text eol=lf
+*.json text eol=lf
+*.html text eol=lf
+*.js text eol=lf
+*.css text eol=lf
+*.sh text eol=lf

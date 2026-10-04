@@ -5,6 +5,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Oxen112774/plumb/internal/i18n"
 	"github.com/Oxen112774/plumb/internal/probe"
 )
 
@@ -200,7 +201,7 @@ func TestTranslateWChanPrefersTheSpecificReason(t *testing.T) {
 		"ep_poll":              WaitNormal,
 	}
 	for symbol, want := range cases {
-		if got := TranslateWChan(symbol).Kind; got != want {
+		if got := TranslateWChan(symbol, i18n.ZH).Kind; got != want {
 			t.Errorf("TranslateWChan(%q).Kind = %v, want %v", symbol, got, want)
 		}
 	}
@@ -210,7 +211,7 @@ func TestTranslateWChanPrefersTheSpecificReason(t *testing.T) {
 // be worse than saying nothing: someone is about to act on this.
 func TestTranslateWChanKeepsUnknownSymbols(t *testing.T) {
 	const symbol = "some_kernel_function_from_the_future"
-	got := TranslateWChan(symbol)
+	got := TranslateWChan(symbol, i18n.ZH)
 
 	if got.Kind != WaitUnknown {
 		t.Errorf("kind = %v, want WaitUnknown", got.Kind)

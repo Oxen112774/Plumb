@@ -6,6 +6,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/Oxen112774/plumb/internal/i18n"
 	"github.com/Oxen112774/plumb/internal/knowledge"
 	"github.com/Oxen112774/plumb/internal/report"
 )
@@ -51,14 +52,14 @@ func bareWhy(args []string) []string {
 // it". With a key it prints every leaf that key matches. Nothing here needs
 // /proc, a server, or a network: the tree is compiled in, so this works on the
 // laptop someone reads it on.
-func writeWhy(w io.Writer, needle string, color bool) error {
+func writeWhy(w io.Writer, needle string, color bool, lang i18n.Lang) error {
 	if strings.TrimSpace(needle) == "" {
-		return writeCatalogue(w, color)
+		return writeCatalogue(w, color, lang)
 	}
 
 	leaves := knowledge.Find(needle)
 	if len(leaves) == 0 {
-		return unknownKey(needle)
+		return unknownKey(needle, lang)
 	}
 
 	for i, l := range leaves {
@@ -68,19 +69,23 @@ func writeWhy(w io.Writer, needle string, color bool) error {
 			}
 		}
 		if len(leaves) > 1 {
-			if _, err := fmt.Fprintf(w, "%s（%s 匹配到 %d 片，下面每一片都算）%s\n\n",
+			multi := "（%s 匹配到 %d 片，下面每一片都算）"
+			if lang == i18n.EN {
+				multi = "(%s matched %d leaves; each one counts)"
+			}
+			if _, err := fmt.Fprintf(w, "%s"+multi+"%s\n\n",
 				dim(color), needle, len(leaves), reset(color)); err != nil {
 				return err
 			}
 		}
-		if err := writeLeaf(w, l, color); err != nil {
+		if err := writeLeaf(w, l, color, lang); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-func writeLeaf(w io.Writer, l knowledge.Leaf, color bool) error {
+func writeLeaf(w io.Writer, l knowledge.Leaf, color bool, lang i18n.Lang) error {
 	var b strings.Builder
 
 	head := l.Key
@@ -91,57 +96,70 @@ func writeLeaf(w io.Writer, l knowledge.Leaf, color bool) error {
 	if color {
 		sep = whyDim + " · " + whyReset
 	}
-	fmt.Fprintf(&b, "%s%s%s%s可信度：%s\n",
-		head, sep, l.Kind, sep, l.Confidence)
+	kindLabel := l.Kind.String()
+	confLabel := l.Confidence.String()
+	if lang == i18n.EN {
+		kindLabel = kindEN(l.Kind)
+		confLabel = confEN(l.Confidence)
+	}
+	fmt.Fprintf(&b, "%s%s%s%s%s: %s\n",
+		head, sep, kindLabel, sep,
+		i18n.Get(lang, i18n.ConfidenceLabel), confLabel)
 
-	section(&b, "它是什么", color)
+	section(&b, i18n.Get(lang, i18n.WhatIsIt), color)
 	body(&b, []string{l.What}, color, false)
 
 	if len(l.Why) > 0 {
-		section(&b, "为什么会出现", color)
+		section(&b, i18n.Get(lang, i18n.WhyItHappens), color)
 		body(&b, l.Why, color, true)
 	}
 
 	if len(l.Fix) > 0 {
-		section(&b, "怎么处置", color)
+		section(&b, i18n.Get(lang, i18n.HowToFix), color)
 		body(&b, l.Fix, color, true)
 	}
 
 	if l.Unknown != "" {
-		section(&b, "看不到的地方", color)
+		section(&b, i18n.Get(lang, i18n.UnknownParts), color)
 		body(&b, []string{l.Unknown}, color, false)
 	}
 
-	section(&b, "出处", color)
+	section(&b, i18n.Get(lang, i18n.Sources), color)
 	body(&b, l.Sources, color, true)
 
-	// The confidence note goes last, after the evidence, because that is where a
-	// reader is when they have to decide what to do. The label in the header has
-	// already told them what to expect.
 	if note := l.Confidence.Note(); note != "" {
 		fmt.Fprintf(&b, "\n%s\n", wrapBlock(note, ""))
 	}
-	fmt.Fprintf(&b, "\n%s\n",
-		dimIf(color, "这一片来自内置的知识树：没有联网，也没有动你的系统。"))
+	footer := "这一片来自内置的知识树：没有联网，也没有动你的系统。"
+	if lang == i18n.EN {
+		footer = "This leaf comes from the built-in knowledge tree: no network, no system changes."
+	}
+	fmt.Fprintf(&b, "\n%s\n", dimIf(color, footer))
 
 	_, err := io.WriteString(w, b.String())
 	return err
 }
 
-func writeCatalogue(w io.Writer, color bool) error {
+func writeCatalogue(w io.Writer, color bool, lang i18n.Lang) error {
 	var b strings.Builder
 	all := knowledge.All()
-	fmt.Fprintf(&b, "%s\n", boldIf(color, fmt.Sprintf("plumb 的知识树里有 %d 片叶子。", len(all))))
-	for _, line := range report.Wrap(
-		"查一片：plumb -why <键>。键可以是内核等待点符号、判定项的名字，或者 /proc 里的文件名。"+
-			"大小写随意，前缀能对上就行。", whyWidth) {
+	hasLabel := "plumb 的知识树里有"
+	hasLabelEN := "plumb's knowledge tree has"
+	leavesLabel := "片叶子。"
+	leavesLabelEN := "leaves."
+	if lang == i18n.EN {
+		fmt.Fprintf(&b, "%s\n", boldIf(color, fmt.Sprintf("%s %d %s", hasLabelEN, len(all), leavesLabelEN)))
+	} else {
+		fmt.Fprintf(&b, "%s\n", boldIf(color, fmt.Sprintf("%s %d %s", hasLabel, len(all), leavesLabel)))
+	}
+	for _, line := range report.Wrap(i18n.Get(lang, i18n.TreeHowToQuery), whyWidth) {
 		fmt.Fprintf(&b, "%s\n", dimIf(color, line))
 	}
 	b.WriteString("\n")
 
 	width := 0
 	for _, l := range all {
-		if n := displayWidth(l.Key); n > width {
+		if n := report.DisplayWidth(l.Key); n > width {
 			width = n
 		}
 	}
@@ -149,7 +167,7 @@ func writeCatalogue(w io.Writer, color bool) error {
 		width = 34
 	}
 
-	for _, kind := range []knowledge.Kind{knowledge.KindWChan, knowledge.KindArea, knowledge.KindProc} {
+	for _, kind := range knowledge.Kinds() {
 		var group []knowledge.Leaf
 		for _, l := range all {
 			if l.Kind == kind {
@@ -159,26 +177,25 @@ func writeCatalogue(w io.Writer, color bool) error {
 		if len(group) == 0 {
 			continue
 		}
-		fmt.Fprintf(&b, "%s\n", boldIf(color, fmt.Sprintf("%s（%d）", kind, len(group))))
-		// The summary gets the rest of the line and wraps onto continuations that
-		// line up under it.
+		kindLabel := kind.String()
+		if lang == i18n.EN {
+			kindLabel = kindEN(kind)
+		}
+		fmt.Fprintf(&b, "%s\n", boldIf(color, fmt.Sprintf("%s（%d）", kindLabel, len(group))))
 		indent := 2 + width + 2
 		avail := whyWidth - indent
 		for _, l := range group {
-			if pad := width - displayWidth(l.Key); pad >= 1 {
+			if pad := width - report.DisplayWidth(l.Key); pad >= 1 {
 				writeEntry(&b, "  "+l.Key+strings.Repeat(" ", pad)+"  ", indent, avail, l)
 				continue
 			}
-			// A key too long for the column takes its summary on the next line
-			// rather than pushing the column right for everyone.
 			fmt.Fprintf(&b, "  %s\n", l.Key)
 			writeEntry(&b, strings.Repeat(" ", indent), indent, avail, l)
 		}
 		b.WriteString("\n")
 	}
-	fmt.Fprintf(&b, "%s\n", dimIf(color,
-		"不确定的地方，每一片里都写着 —— 这一棵树不含糊其辞。\n"+
-			"看一片的全文：plumb -why <键>"))
+	footer := i18n.Get(lang, i18n.TreeFooter) + "\n" + i18n.Get(lang, i18n.TreeFullEntry)
+	fmt.Fprintf(&b, "%s\n", dimIf(color, footer))
 
 	_, err := io.WriteString(w, b.String())
 	return err
@@ -210,19 +227,57 @@ func writeEntry(b *strings.Builder, prefix string, indent, avail int, l knowledg
 // tree is that the reader has a name in hand and wants to know whether it is in
 // it. So the message says what to try instead, and reminds them that the
 // catalogue exists.
-func unknownKey(needle string) error {
+func unknownKey(needle string, lang i18n.Lang) error {
 	near := knowledge.Nearby(needle, 8)
 	var b strings.Builder
-	fmt.Fprintf(&b, "知识树里没有匹配 %q 的叶子。", needle)
+	if lang == i18n.EN {
+		fmt.Fprintf(&b, "No leaf in the knowledge tree matches %q.", needle)
+	} else {
+		fmt.Fprintf(&b, "知识树里没有匹配 %q 的叶子。", needle)
+	}
 	if len(near) > 0 {
 		sort.Strings(near)
-		b.WriteString("\n\n相近的有：\n")
+		if lang == i18n.EN {
+			b.WriteString("\n\nNearby keys:\n")
+		} else {
+			b.WriteString("\n\n相近的有：\n")
+		}
 		for _, k := range near {
 			fmt.Fprintf(&b, "  %s\n", k)
 		}
 	}
-	b.WriteString("\n列出全部：plumb -why")
+	if lang == i18n.EN {
+		b.WriteString("\nList all: plumb -why")
+	} else {
+		b.WriteString("\n列出全部：plumb -why")
+	}
 	return fmt.Errorf("%s", b.String())
+}
+
+func kindEN(k knowledge.Kind) string {
+	switch k {
+	case knowledge.KindWChan:
+		return "kernel wait-point"
+	case knowledge.KindArea:
+		return "check"
+	case knowledge.KindProc:
+		return "data source"
+	case knowledge.KindStack:
+		return "wait subsystem"
+	}
+	return "unknown"
+}
+
+func confEN(c knowledge.Confidence) string {
+	switch c {
+	case knowledge.Certain:
+		return "evidence-backed"
+	case knowledge.Rough:
+		return "direction only"
+	case knowledge.NameOnly:
+		return "symptom only"
+	}
+	return "unknown"
 }
 
 // section prints a section heading.
@@ -276,30 +331,4 @@ func tone(color bool, code string) string {
 		return ""
 	}
 	return code
-}
-
-// displayWidth estimates how many terminal columns a string occupies: a CJK
-// character or full-width punctuation takes two, anything else one.
-//
-// It exists because the leaf keys mix Chinese and ASCII, and a column padded by
-// byte count comes out visibly ragged on exactly the ten entries that are
-// Chinese. An estimate is enough here — the keys are short, and being two
-// columns out on an exotic glyph costs nothing.
-func displayWidth(s string) int {
-	w := 0
-	for _, r := range s {
-		switch {
-		case r >= 0x1100 && r <= 0x115f, // Hangul Jamo
-			r >= 0x2e80 && r <= 0xa4cf, // CJK radicals through Yi
-			r >= 0xac00 && r <= 0xd7a3, // Hangul syllables
-			r >= 0xf900 && r <= 0xfaff, // CJK compatibility ideographs
-			r >= 0xfe30 && r <= 0xfe6f, // CJK compatibility forms
-			r >= 0xff00 && r <= 0xff60, // full-width forms
-			r >= 0xffe0 && r <= 0xffe6: // full-width signs
-			w += 2
-		default:
-			w++
-		}
-	}
-	return w
 }

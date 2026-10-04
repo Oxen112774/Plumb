@@ -53,6 +53,11 @@ const (
 	KindArea
 	// KindProc is a file or field a number was read from.
 	KindProc
+	// KindStack is a kernel subsystem a thread's call chain resolves to —
+	// read from /proc/<pid>/task/<tid>/stack, not from wchan. It is kept a
+	// separate kind because it answers a different question: wchan says
+	// which function, a stack says which subsystem decided to wait.
+	KindStack
 )
 
 func (k Kind) String() string {
@@ -63,6 +68,8 @@ func (k Kind) String() string {
 		return "判定项"
 	case KindProc:
 		return "数据来源"
+	case KindStack:
+		return "等待子系统"
 	}
 	return "未知类别"
 }
@@ -163,6 +170,7 @@ var tree = buildTree()
 func buildTree() []Leaf {
 	var all []Leaf
 	all = append(all, wchanLeaves...)
+	all = append(all, stackLeaves...)
 	all = append(all, areaLeaves...)
 	all = append(all, procLeaves...)
 	return all
@@ -170,6 +178,17 @@ func buildTree() []Leaf {
 
 // All returns every leaf in catalogue order.
 func All() []Leaf { return tree }
+
+// Kinds lists every kind, in the order the catalogue prints them.
+//
+// The catalogue ranges over this rather than over a literal list of three,
+// because a kind that is added to the tree and forgotten here does not fail —
+// it just vanishes from the listing, and the tree quietly shrinks for anyone
+// browsing it. TestKindsCoverTheTree is what makes that a build error rather
+// than a missing section.
+func Kinds() []Kind {
+	return []Kind{KindWChan, KindStack, KindArea, KindProc}
+}
 
 // Find resolves a key to the leaves that match it.
 //

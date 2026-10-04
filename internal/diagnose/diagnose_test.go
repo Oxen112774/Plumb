@@ -170,6 +170,33 @@ func TestCulpritFloorFiltersNoise(t *testing.T) {
 	}
 }
 
+// A leader whose activity is below the divisor would floor to zero, and a floor
+// of zero lets a process that did nothing at all clear it — the heading then
+// names the idle as suspects.
+func TestCulpritFloorIsNeverZero(t *testing.T) {
+	if got := floorOf(3); got != 1 {
+		t.Errorf("floorOf(3) = %d, want 1", got)
+	}
+	if got := floorOf(4000); got != 200 {
+		t.Errorf("floorOf(4000) = %d, want 200", got)
+	}
+}
+
+// A running machine always accumulates jiffies, so a zero aggregate means
+// /proc/stat could not be read. Reporting 0.0% would be a fabricated reading.
+func TestCPUIsMarkedUnmeasuredOnlyWhenUnreadable(t *testing.T) {
+	prev := probe.Snapshot{At: time.Now().Add(-time.Second), CPU: probe.CPUTimes{Idle: 1000}}
+
+	read := probe.Snapshot{At: time.Now(), CPU: probe.CPUTimes{Idle: 1000}}
+	if rep := Analyze(prev, read, Options{Interval: time.Second}); !rep.CPUMeasured {
+		t.Error("CPUMeasured = false after a readable /proc/stat")
+	}
+	unread := probe.Snapshot{At: time.Now()}
+	if rep := Analyze(prev, unread, Options{Interval: time.Second}); rep.CPUMeasured {
+		t.Error("CPUMeasured = true for a zero aggregate")
+	}
+}
+
 // USER_HZ is 100, so one tick per second is one percent of one core.
 func TestPercentOfCore(t *testing.T) {
 	if got := PercentOfCore(110, time.Second); got != 110 {

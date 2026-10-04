@@ -16,6 +16,7 @@ import (
 	"sort"
 	"time"
 
+	"github.com/Oxen112774/plumb/internal/i18n"
 	"github.com/Oxen112774/plumb/internal/probe"
 )
 
@@ -62,20 +63,23 @@ func (s Severity) Marker() string {
 	}
 }
 
-// Label is the Chinese display name.
-func (s Severity) Label() string {
+// Label is the severity's display name in lang.
+func (s Severity) Label(lang i18n.Lang) string {
+	zh, en := "信息", "INFO"
 	switch s {
 	case SeverityCritical:
-		return "严重"
+		zh, en = "严重", "CRITICAL"
 	case SeverityWarning:
-		return "警告"
+		zh, en = "警告", "WARNING"
 	case SeverityWatch:
-		return "注意"
+		zh, en = "注意", "WATCH"
 	case SeverityOK:
-		return "正常"
-	default:
-		return "信息"
+		zh, en = "正常", "OK"
 	}
+	if lang == i18n.EN {
+		return en
+	}
+	return zh
 }
 
 // Evidence is one supporting measurement and where it came from.
@@ -91,6 +95,14 @@ type Culprit struct {
 	User    string `json:"user,omitempty"`
 	Cmdline string `json:"cmdline,omitempty"`
 	Note    string `json:"note"`
+
+	// LastCPU is the core this process last ran on, from field 39 of
+	// /proc/<pid>/stat. It is carried rather than left to be re-read because
+	// it is the evidence that ties a per-core finding to a named process:
+	// "a core is full" plus "a process is busy" does not license naming that
+	// process as the cause — this does.
+	LastCPU      int  `json:"last_cpu"`
+	LastCPUKnown bool `json:"last_cpu_known"`
 }
 
 // Finding is one attributed conclusion.
@@ -146,11 +158,106 @@ type Report struct {
 	// SingleSample is true when only one snapshot was available, so anything
 	// requiring a rate — process attribution in particular — is unavailable.
 	SingleSample bool `json:"single_sample"`
+
+	// CPUMeasured is false when /proc/stat could not be read. The CPU lines are
+	// then omitted rather than printed as a misleading 0.0%.
+	CPUMeasured bool `json:"cpu_measured"`
+
+	// Net is the TCP activity across the sample window: retransmit rate and
+	// listen-queue drops, both of which slow a server down while every other
+	// counter looks clean.
+	Net NetUsage `json:"net"`
+
+	// Throttle is the CPU throttling measured inside this sample window, when
+	// two samples were taken. The findings and the overview both read it, so
+	// the two cannot disagree about whether the pod is being stopped now.
+	Throttle ThrottleRate `json:"throttle"`
+
+	// Cgroup is the resource envelope this run sits inside, when a cgroup v2
+	// limit applies. It is the context in which Memory and load-per-core must
+	// be read on a container.
+	Cgroup probe.Cgroup `json:"cgroup,omitempty"`
+
+	// K8s names the pod this run sits in, when a kubelet put it there.
+	//
+	// It travels with the report for the same reason the hostname does: the
+	// reports that matter are the ones collected from twenty nodes by someone
+	// who was not there, and a snapshot without an identity cannot be told
+	// apart from the nineteen next to it.
+	K8s probe.K8sContext `json:"k8s,omitempty"`
+
+	// Thresholds are the cut-offs the findings were judged by.
+	//
+	// They travel with the report for the same reason a measurement does: a
+	// reader holding last month's report must be able to see which line
+	// "critical" meant that day, including when someone had moved it.
+	Thresholds Thresholds `json:"thresholds"`
+}
+
+// ThrottleRate is CPU throttling measured inside the sample window, next to
+// the cumulative counters the cgroup itself carries.
+//
+// The cumulative pair answers "how much has this quota cost in total", which
+// on a pod that has been up for a week is dominated by history. The window
+// answers the question someone actually has: is it being stopped right now.
+// Both are kept because the difference between them is itself informative —
+// a pod at 31% cumulative and 80% in the window is in trouble this second,
+// while one at 31% and 0% recovered some time ago.
+type ThrottleRate struct {
+	// Periods is how many enforcement periods elapsed in the window.
+	Periods uint64 `json:"periods"`
+	// Throttled is how many of them ended with the cgroup stopped.
+	Throttled uint64 `json:"throttled"`
+	// Measured is false in single-sample mode, and whenever no enforcement
+	// period elapsed inside the window — a window containing zero periods
+	// has nothing to report, and dividing by it would be meaningless.
+	Measured bool `json:"measured"`
+}
+
+// Pct is the share of the window's periods that ended with the cgroup
+// stopped, or 0 when the window proved nothing.
+func (t ThrottleRate) Pct() float64 {
+	if !t.Measured || t.Periods == 0 {
+		return 0
+	}
+	return float64(t.Throttled) * 100 / float64(t.Periods)
+}
+
+// NetUsage is the TCP accounting turned into rates over the sample window.
+//
+// The kernel keeps these as counters since boot; a rate needs both samples,
+// which is why the whole struct is zero in single-sample mode.
+type NetUsage struct {
+	// RetransPct is retransmitted segments as a percentage of segments sent.
+	// Retransmission means a packet was presumed lost and sent again: the
+	// receiver waits, the sender waits for the ack, and every affected request
+	// pays a multiple of the round-trip time. It is the TCP-level signature of
+	// packet loss, a saturated link, or a far end too slow to keep up.
+	RetransPct  float64 `json:"retrans_pct"`
+	OutSegs     uint64  `json:"out_segs"`
+	RetransSegs uint64  `json:"retrans_segs"`
+
+	// ListenDrops and ListenOverflows count connections refused at the listen
+	// queue during the window. Each one is a client that got a timeout or a
+	// connection reset, not a slow response — the application never saw it.
+	ListenDrops     uint64 `json:"listen_drops"`
+	ListenOverflows uint64 `json:"listen_overflows"`
+
+	SyncookiesFailed uint64 `json:"syncookies_failed"`
+
+	// Measured is false in single-sample mode, or when the network counters
+	// could not be read at all. It keeps an unread network from reading as a
+	// clean one.
+	Measured bool `json:"measured"`
 }
 
 // Worst returns the most severe finding, or a synthetic OK finding when the
 // machine looks healthy.
-func (r Report) Worst() Finding {
+//
+// lang is taken because the synthetic finding is text plumb wrote rather than
+// a measurement it read, and it is the one place a report can be empty of
+// every other string.
+func (r Report) Worst(lang i18n.Lang) Finding {
 	for _, f := range r.Findings {
 		if f.Severity != SeverityOK && f.Severity != SeverityInfo {
 			return f
@@ -159,10 +266,14 @@ func (r Report) Worst() Finding {
 	if len(r.Findings) > 0 {
 		return r.Findings[0]
 	}
+	area, headline := "整体", "未发现明显瓶颈"
+	if lang == i18n.EN {
+		area, headline = "overall", "no obvious bottleneck found"
+	}
 	return Finding{
-		Area:     "整体",
+		Area:     area,
 		Severity: SeverityOK,
-		Headline: "未发现明显瓶颈",
+		Headline: headline,
 	}
 }
 
@@ -184,6 +295,11 @@ type Options struct {
 	Interval time.Duration
 	// Top is how many culprit processes to name per finding.
 	Top int
+	// Thresholds are the severity cut-offs, already filled in by the caller
+	// or empty for the built-in defaults.
+	Thresholds Thresholds
+	// Lang is the language the finding text is written in.
+	Lang i18n.Lang
 }
 
 // Analyze compares two snapshots and produces a ranked report.
@@ -202,10 +318,17 @@ func Analyze(prev, cur probe.Snapshot, opts Options) Report {
 		interval: opts.Interval,
 		top:      opts.Top,
 		hasPrev:  !prev.At.IsZero() && opts.Interval > 0,
+		th:       opts.Thresholds.WithDefaults(),
+		lang:     opts.Lang,
 	}
-	if a.hasPrev {
+	// A machine that is running always accumulates jiffies, so a zero
+	// aggregate means the file could not be read, not that nothing happened.
+	a.cpuMeasured = a.hasPrev && cur.CPU.Total() > 0
+	if a.cpuMeasured {
 		a.cpu = computeCPUUsage(prev.CPU, cur.CPU)
 	}
+	a.net = computeNetUsage(prev.Net, cur.Net, a.hasPrev)
+	a.throttle = computeThrottleRate(prev.Cgroup.Throttle, cur.Cgroup.Throttle, a.hasPrev)
 
 	rep := Report{
 		StartedAt:    cur.At,
@@ -219,6 +342,12 @@ func Analyze(prev, cur probe.Snapshot, opts Options) Report {
 		OpenFiles:    cur.OpenFiles,
 		Errors:       cur.Errors,
 		SingleSample: !a.hasPrev,
+		CPUMeasured:  a.cpuMeasured,
+		Net:          a.net,
+		Throttle:     a.throttle,
+		Cgroup:       cur.Cgroup,
+		K8s:          cur.K8s,
+		Thresholds:   a.th,
 	}
 	rep.Findings = sortFindings(a.run())
 	return rep
@@ -231,7 +360,62 @@ type analysis struct {
 	interval  time.Duration
 	top       int
 	hasPrev   bool
-	cpu       CPUUsage
+	// cpuMeasured is hasPrev plus a readable aggregate: the CPU-derived rules
+	// and the CPU report lines key off it, not off hasPrev.
+	cpuMeasured bool
+	cpu         CPUUsage
+	net         NetUsage
+	throttle    ThrottleRate
+
+	// th are the cut-offs this run judged by, and lang the language its
+	// findings are written in. Both are carried rather than passed down so
+	// every rule reads the same values without threading arguments.
+	th   Thresholds
+	lang i18n.Lang
+}
+
+// msg picks the language-appropriate format and fills it.
+//
+// Both languages sit next to each other at the point of use on purpose. A
+// translation table in another file drifts the moment a rule's wording is
+// edited, and the drift is invisible: nothing fails, the English just quietly
+// describes the old rule. Keeping the pair together means changing one
+// without the other is a change a reviewer can see.
+func (a *analysis) msg(zh, en string, args ...any) string {
+	s := zh
+	if a.lang == i18n.EN {
+		s = en
+	}
+	if len(args) == 0 {
+		return s
+	}
+	return fmt.Sprintf(s, args...)
+}
+
+// pressure returns the PSI the rules should judge by: this process's own
+// cgroup's, when one exists with per-cgroup PSI, otherwise the system-wide
+// one.
+//
+// In a container the system-wide numbers describe everyone's waiting — the
+// noisy neighbour included — while the cgroup's own describe this workload's.
+// On a host with no limit the two are the same files' contents, so the
+// preference changes nothing there.
+func (a *analysis) pressure() probe.Pressure {
+	if c := a.cur.Cgroup; c.V2 && c.Pressure.Supported {
+		return c.Pressure
+	}
+	return a.cur.Pressure
+}
+
+// pressureSource names where pressure() came from, for the evidence line: a
+// finding's source must say which file the number was read from, and with two
+// possible PSI locations the label is the only thing keeping the claim
+// checkable.
+func (a *analysis) pressureSource(name string) string {
+	if c := a.cur.Cgroup; c.V2 && c.Pressure.Supported {
+		return "/sys/fs/cgroup/" + name + ".pressure"
+	}
+	return "/proc/pressure/" + name
 }
 
 // run evaluates every rule and keeps the ones that fired.
@@ -241,11 +425,14 @@ func (a *analysis) run() []Finding {
 		a.ruleBlockedThreads,
 		a.ruleMemoryPressure,
 		a.ruleCPUPressure,
+		a.ruleCPUThrottle,
 		a.ruleCoreSkew,
 		a.ruleSteal,
 		a.ruleSwap,
 		a.ruleDiskSpace,
 		a.ruleDirtyPages,
+		a.ruleNetwork,
+		a.ruleCgroupMemory,
 	}
 	var out []Finding
 	for _, rule := range rules {
@@ -254,6 +441,47 @@ func (a *analysis) run() []Finding {
 		}
 	}
 	return out
+}
+
+// computeNetUsage turns two TCP counter readings into window rates. A counter
+// that went backwards — a namespace restart, a module reload — yields zero
+// rather than a negative rate, and the caller's Measured flag carries whether
+// the reading was there at all.
+func computeNetUsage(prev, cur probe.NetTCP, hasPrev bool) NetUsage {
+	if !hasPrev || !cur.Known || !prev.Known {
+		return NetUsage{}
+	}
+	out := NetUsage{
+		OutSegs:          sub(cur.OutSegs, prev.OutSegs),
+		RetransSegs:      sub(cur.RetransSegs, prev.RetransSegs),
+		ListenDrops:      sub(cur.ListenDrops, prev.ListenDrops),
+		ListenOverflows:  sub(cur.ListenOverflows, prev.ListenOverflows),
+		SyncookiesFailed: sub(cur.SyncookiesFailed, prev.SyncookiesFailed),
+		Measured:         true,
+	}
+	if out.OutSegs > 0 {
+		out.RetransPct = Round2(float64(out.RetransSegs) * 100 / float64(out.OutSegs))
+	}
+	return out
+}
+
+// computeThrottleRate turns two CFS counter readings into the rate inside the
+// window. A window in which no enforcement period elapsed proves nothing and
+// is reported as unmeasured rather than as a clean zero: "0 of 0 periods" is
+// not a finding, it is an absence of one.
+func computeThrottleRate(prev, cur probe.CPUThrottle, hasPrev bool) ThrottleRate {
+	if !hasPrev || !prev.Known || !cur.Known {
+		return ThrottleRate{}
+	}
+	periods := sub(cur.Periods, prev.Periods)
+	if periods == 0 {
+		return ThrottleRate{}
+	}
+	return ThrottleRate{
+		Periods:   periods,
+		Throttled: sub(cur.Throttled, prev.Throttled),
+		Measured:  true,
+	}
 }
 
 func sortFindings(fs []Finding) []Finding {
@@ -295,6 +523,16 @@ func computeCPUUsage(prev, cur probe.CPUTimes) CPUUsage {
 // Naming someone as the cause of an incident is an accusation; it should carry
 // a numeric floor.
 const culpritFloorDivisor = 20
+
+// floorOf returns the smallest value a candidate must reach to be named: a
+// twentieth of the leader, but never zero. A floor of zero lets a process that
+// did nothing at all clear it, and the heading then names the idle as suspects.
+func floorOf(leader uint64) uint64 {
+	if f := leader / culpritFloorDivisor; f > 0 {
+		return f
+	}
+	return 1
+}
 
 // procDiff is one process's activity measured over the sample window.
 type procDiff struct {
@@ -345,19 +583,19 @@ func (a *analysis) TopIO(n int) []Culprit {
 	if leader == 0 {
 		return nil
 	}
-	floor := leader / culpritFloorDivisor
+	floor := floorOf(leader)
 
 	var out []Culprit
 	for _, d := range diffs {
 		if !d.ioOK || d.read+d.write < floor {
-			break
+			continue
 		}
 		out = append(out, Culprit{
 			PID:     d.proc.PID,
 			Name:    d.proc.Name,
 			User:    d.proc.User,
 			Cmdline: d.proc.Cmdline,
-			Note: fmt.Sprintf("读 %s，写 %s",
+			Note: a.msg("读 %s，写 %s", "read %s, wrote %s",
 				HumanRate(d.read, a.interval), HumanRate(d.write, a.interval)),
 		})
 		if len(out) >= n {
@@ -385,20 +623,22 @@ func (a *analysis) TopCPU(n int) []Culprit {
 	if leader == 0 {
 		return nil
 	}
-	floor := leader / culpritFloorDivisor
+	floor := floorOf(leader)
 
 	var out []Culprit
 	for _, d := range diffs {
 		if d.ticks < floor {
-			break
+			continue
 		}
 		out = append(out, Culprit{
 			PID:     d.proc.PID,
 			Name:    d.proc.Name,
 			User:    d.proc.User,
 			Cmdline: d.proc.Cmdline,
-			Note: fmt.Sprintf("占用 %s 核",
+			Note: a.msg("占用 %s 核", "using %s cores",
 				trimFloat(CoresUsed(d.ticks, a.interval))),
+			LastCPU:      d.proc.LastCPU,
+			LastCPUKnown: d.proc.LastCPUKnown,
 		})
 		if len(out) >= n {
 			break
@@ -414,20 +654,20 @@ func (a *analysis) TopRSS(n int) []Culprit {
 	if len(procs) == 0 || procs[0].RSSPages == 0 {
 		return nil
 	}
-	floor := procs[0].RSSPages / culpritFloorDivisor
+	floor := floorOf(procs[0].RSSPages)
 
 	page := uint64(os.Getpagesize())
 	var out []Culprit
 	for _, p := range procs {
 		if p.RSSPages < floor {
-			break
+			continue
 		}
 		out = append(out, Culprit{
 			PID:     p.PID,
 			Name:    p.Name,
 			User:    p.User,
 			Cmdline: p.Cmdline,
-			Note:    fmt.Sprintf("常驻内存 %s", HumanBytes(p.RSSPages*page)),
+			Note:    a.msg("常驻内存 %s", "%s resident", HumanBytes(p.RSSPages*page)),
 		})
 		if len(out) >= n {
 			break

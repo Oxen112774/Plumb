@@ -17,6 +17,14 @@ type Snapshot struct {
 	Disks    []DiskIO
 	RootFS   DiskSpace
 	Procs    []Process
+	Net      NetTCP
+	Cgroup   Cgroup
+
+	// K8s is the pod this process was placed in, when a kubelet placed it in
+	// one. It is read from the same hierarchy as Cgroup and is carried
+	// alongside it because the two answer different questions: Cgroup says
+	// what the limits are, K8s says whose limits they are.
+	K8s K8sContext `json:"k8s,omitempty"`
 
 	// Threads and OpenFiles are filled only by AttachThreadScan, and only on
 	// the later of the two samples. Walking every thread table costs a
@@ -38,11 +46,39 @@ type Snapshot struct {
 func Take(r Root, mountPoint string) Snapshot {
 	s := Snapshot{At: time.Now()}
 
-	cores, err := CountCores(r)
+	// /proc/stat is read once and serves both the CPU counters and the core
+	// count; reading it twice would copy the same kernel data twice for no
+	// reason.
+	agg, perCore, err := ReadCPUAll(r)
 	if err != nil {
 		s.Errors = append(s.Errors, err.Error())
+	}
+	s.CPU, s.CPUCores = agg, perCore
+
+	cores := len(perCore)
+	if cores == 0 {
+		if err == nil {
+			s.Errors = append(s.Errors, "proc/stat: no per-cpu lines")
+		}
 		cores = runtime.NumCPU()
 	}
+
+	// The cgroup envelope is read before anything that divides by core count:
+	// in a container the host's cores are not this workload's cores, and load
+	// per core read against the wrong denominator is a confident wrong number.
+	s.Cgroup, err = ReadCgroup(r)
+	if err != nil {
+		s.Errors = append(s.Errors, err.Error())
+	}
+	if s.Cgroup.V2 {
+		s.Cgroup.HostCores = cores
+		cores = EffectiveCores(cores, s.Cgroup.CPUQuotaCores)
+	}
+	// Read after the hierarchy has been found, not before: on a host with no
+	// cgroup v2 there is no kubelet-shaped path to parse either, and the
+	// ordering keeps the two from disagreeing about which root was used.
+	s.K8s = ReadK8sContext(r)
+
 	sys, err := ReadSystem(r, cores)
 	if err != nil {
 		s.Errors = append(s.Errors, err.Error())
@@ -50,12 +86,6 @@ func Take(r Root, mountPoint string) Snapshot {
 	s.System = sys
 	if s.System.Cores == 0 {
 		s.System.Cores = cores
-	}
-
-	if agg, perCore, err := ReadCPUAll(r); err != nil {
-		s.Errors = append(s.Errors, err.Error())
-	} else {
-		s.CPU, s.CPUCores = agg, perCore
 	}
 
 	if mem, err := ReadMemory(r); err != nil {
@@ -86,6 +116,12 @@ func Take(r Root, mountPoint string) Snapshot {
 		s.Errors = append(s.Errors, err.Error())
 	} else {
 		s.Procs = ReadProcesses(r, pids, ReadUsers(r))
+	}
+
+	if net, err := ReadNetTCP(r); err != nil {
+		s.Errors = append(s.Errors, err.Error())
+	} else {
+		s.Net = net
 	}
 
 	return s

@@ -5,6 +5,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/Oxen112774/plumb/internal/i18n"
 	"github.com/Oxen112774/plumb/internal/probe"
 )
 
@@ -27,7 +28,18 @@ const (
 // It is exported because package voice reads these notes too, to say in one
 // sentence what a blocked process is holding. A marker written out in two
 // packages is a marker that will drift in one of them.
-const HeldFilesHeader = "持有文件："
+const (
+	HeldFilesHeader   = "持有文件："
+	HeldFilesHeaderEN = "holds:"
+)
+
+// HeldFilesHeaderFor returns the marker for a language.
+func HeldFilesHeaderFor(lang i18n.Lang) string {
+	if lang == i18n.EN {
+		return HeldFilesHeaderEN
+	}
+	return HeldFilesHeader
+}
 
 // ruleBlockedThreads reports the processes the kernel has stopped dead.
 //
@@ -63,7 +75,7 @@ func (a *analysis) ruleBlockedThreads() *Finding {
 	for _, bp := range blocked {
 		e := entry{pt: bp}
 		for _, th := range bp.BlockedOn {
-			w := TranslateWChan(th.WChan)
+			w := TranslateWChan(th.WChan, a.lang)
 			e.waits = append(e.waits, w)
 			if w.Blocking() {
 				e.storage++
@@ -99,25 +111,49 @@ func (a *analysis) ruleBlockedThreads() *Finding {
 
 	var headline string
 	if storageThreads > 0 {
-		headline = fmt.Sprintf("有 %d 个线程被内核堵住，动不了也杀不掉", storageThreads)
+		headline = a.msg("有 %d 个线程被内核堵住，动不了也杀不掉",
+			"%d threads are blocked by the kernel: they cannot move and cannot be killed",
+			storageThreads)
 	} else {
-		headline = fmt.Sprintf("%d 个线程处于不可中断睡眠，但等待点不是磁盘或内存",
+		headline = a.msg("%d 个线程处于不可中断睡眠，但等待点不是磁盘或内存",
+			"%d threads are in uninterruptible sleep, but not waiting on storage or memory",
 			a.cur.Threads.Blocked)
 	}
 
 	evidence := []Evidence{
-		{Source: "/proc/<pid>/task", Detail: fmt.Sprintf(
+		{Source: "/proc/<pid>/task", Detail: a.msg(
 			"全机 %d 个线程中 %d 个处于 D 状态（不可中断睡眠，信号无法送达）",
-			a.cur.Threads.Total, a.cur.Threads.Blocked)},
-		{Source: "/proc/<pid>/wchan", Detail: "wchan 给出线程此刻停在内核的哪个函数上，即它在等什么"},
-		{Source: "/proc/<pid>/fd", Detail: "被堵住的进程持有的普通文件；socket、pipe、anon_inode 与 /dev 已滤掉"},
-		{Source: "plumb", Detail: "D 状态是某一瞬间的采样：一两个通常是正常的同步写，" +
-			"数量持续偏高才说明存储真的顶不住"},
+			"%d of the machine's %d threads are in D state (uninterruptible sleep; signals do not land)",
+			a.cur.Threads.Blocked, a.cur.Threads.Total)},
+		{Source: "/proc/<pid>/wchan", Detail: a.msg(
+			"wchan 给出线程此刻停在内核的哪个函数上，即它在等什么",
+			"wchan names the kernel function the thread is parked in, which is what it is waiting for")},
+		{Source: "/proc/<pid>/fd", Detail: a.msg(
+			"被堵住的进程持有的普通文件；socket、pipe、anon_inode 与 /dev 已滤掉",
+			"regular files held by the blocked processes; sockets, pipes, anon_inode and /dev are filtered out")},
+		{Source: "plumb", Detail: a.msg(
+			"D 状态是某一瞬间的采样：一两个通常是正常的同步写，数量持续偏高才说明存储真的顶不住",
+			"D state is a sample of one instant: one or two is usually an ordinary synchronous "+
+				"write; a count that stays high is what says storage really cannot keep up")},
+	}
+	// Kernel stacks, when the kernel exposes them, name the subsystem the
+	// wait belongs to. wchan cannot: it is the innermost frame, and io_schedule
+	// is where every block-I/O wait bottoms out. The subsystem is what
+	// separates remedies that are not interchangeable.
+	if line := a.BlockedSubsystemLine(); line != "" {
+		evidence = append(evidence, Evidence{
+			// Same abbreviation the wchan row above uses: the real path is
+			// /proc/<pid>/task/<tid>/stack, and the full form would break the
+			// source column the other rows line up in.
+			Source: "/proc/<pid>/stack",
+			Detail: line,
+		})
 	}
 	if ioStalling {
 		evidence = append(evidence, Evidence{
 			Source: "/proc/pressure/io",
-			Detail: fmt.Sprintf("full avg10=%.2f：与上面的被堵线程互相印证",
+			Detail: a.msg("full avg10=%.2f：与上面的被堵线程互相印证",
+				"full avg10=%.2f: corroborates the blocked threads above",
 				a.cur.Pressure.IO.Full.Avg10),
 		})
 	}
@@ -127,9 +163,16 @@ func (a *analysis) ruleBlockedThreads() *Finding {
 		var note strings.Builder
 		for i, th := range e.pt.BlockedOn {
 			w := e.waits[i]
-			fmt.Fprintf(&note, "线程 %d：%s", th.TID, w.Short)
+			note.WriteString(a.msg("线程 %d：%s", "thread %d: %s", th.TID, w.Short))
 			if w.Symbol != "" {
 				fmt.Fprintf(&note, "  [%s]", w.Symbol)
+			}
+			// The stack names the subsystem the wait belongs to, which wchan
+			// cannot: wchan is the innermost frame and is usually io_schedule.
+			// The deciding frame is printed so the call can be checked.
+			if th.Stack.Subsystem != "" {
+				fmt.Fprintf(&note, "\n  %s", a.msg("内核栈：%s（依据 %s）",
+					"kernel stack: %s (decided by %s)", a.subsystemName(th.Stack.Subsystem), th.Stack.DecidedBy))
 			}
 			note.WriteString("\n")
 		}
@@ -137,13 +180,14 @@ func (a *analysis) ruleBlockedThreads() *Finding {
 			// One path per line: a long list wrapped to the column budget
 			// breaks paths mid-component, and the path is the piece of
 			// evidence here that has to survive being read aloud.
-			note.WriteString(HeldFilesHeader)
+			note.WriteString(HeldFilesHeaderFor(a.lang))
 			for _, p := range set.Paths {
 				note.WriteString("\n  " + p)
 			}
 			if set.Truncated() {
-				fmt.Fprintf(&note, "\n  另有 %d 个未列出（-files 0 可全部列出）",
-					set.Distinct-len(set.Paths))
+				note.WriteString("\n  " + a.msg("另有 %d 个未列出（-files 0 可全部列出）",
+					"%d more not listed (-files 0 lists them all)",
+					set.Distinct-len(set.Paths)))
 			}
 		}
 
@@ -155,20 +199,32 @@ func (a *analysis) ruleBlockedThreads() *Finding {
 		})
 	}
 
-	advice := "D 状态的线程连 SIGKILL 都不会生效 —— 它会挂到 IO 完成为止，" +
-		"所以碰到杀不掉的进程，别反复 kill：先看它卡在哪个内核函数、手里拿着哪个文件，" +
-		"那才是真正在等的东西。"
-	if len(entries) > 0 && entries[0].storage > 0 {
+	advice := a.msg(
+		"D 状态的线程连 SIGKILL 都不会生效 —— 它会挂到 IO 完成为止，"+
+			"所以碰到杀不掉的进程，别反复 kill：先看它卡在哪个内核函数、手里拿着哪个文件，"+
+			"那才是真正在等的东西。",
+		"A thread in D state will not take a SIGKILL — it hangs until the I/O returns. So "+
+			"when a process will not die, stop killing it: look at which kernel function it is "+
+			"parked in and which file it holds. That is what it is actually waiting for.")
+	if subs := a.blockedSubsystems(); len(subs) > 0 {
+		// The stack answer wins over the wchan answer when both exist. wchan
+		// names the innermost frame — nearly always io_schedule — while the
+		// stack names the subsystem that decided to wait. "This is NFS and
+		// this machine is fine" is actionable; "this is I/O" is not.
+		if s := TranslateSubsystem(subs[0], a.lang); s.Advice != "" {
+			advice = joinSentences(s.Advice, advice, a.lang)
+		}
+	} else if len(entries) > 0 && entries[0].storage > 0 {
 		for _, w := range entries[0].waits {
 			if w.Blocking() && w.Advice != "" {
-				advice = joinSentences(w.Advice, advice)
+				advice = joinSentences(w.Advice, advice, a.lang)
 				break
 			}
 		}
 	}
 
 	return &Finding{
-		Area:     "被堵住的线程",
+		Area:     a.msg("被堵住的线程", "blocked threads"),
 		Severity: sev,
 		Headline: headline,
 		Evidence: evidence,
@@ -189,7 +245,7 @@ func (a *analysis) cmdlineFor(pid int) string {
 
 // joinSentences glues two advice sentences together. Chinese ends a sentence
 // with a full-width stop and needs no space after it; an English fragment does.
-func joinSentences(a, b string) string {
+func joinSentences(a, b string, lang i18n.Lang) string {
 	if a == "" {
 		return b
 	}
@@ -199,7 +255,10 @@ func joinSentences(a, b string) string {
 	if r := []rune(a); len(r) > 0 && strings.ContainsRune("。！？；", r[len(r)-1]) {
 		return a + b
 	}
-	return a + " " + b
+	if lang == i18n.EN {
+		return a + " " + b
+	}
+	return a + b
 }
 
 // ruleCoreSkew catches the single-threaded process pinning one core.
@@ -211,7 +270,7 @@ func joinSentences(a, b string) string {
 // structural — shard the work, run more workers — not "add more cores", which
 // is what the healthy-looking average would suggest.
 func (a *analysis) ruleCoreSkew() *Finding {
-	if !a.hasPrev {
+	if !a.cpuMeasured {
 		return nil
 	}
 	loads := a.cur.CoreLoads(a.prev)
@@ -235,17 +294,40 @@ func (a *analysis) ruleCoreSkew() *Finding {
 	}
 	sort.Slice(peaks, func(i, j int) bool { return peaks[i].ID < peaks[j].ID })
 
+	// Under a CPU quota the per-core lines describe the host, not this
+	// workload: /proc/stat lists every host core regardless of what this
+	// cgroup may run on, so a co-tenant's process can be the one pinning
+	// core 0. Two facts — "a core is full" and "a process of ours is busy" —
+	// do not license naming that process as the cause, so inside a quota the
+	// rule demands the one piece of evidence that actually links them:
+	// field 39 of /proc/<pid>/stat, the CPU the task last ran on.
+	quota := a.cur.Cgroup.V2 && a.cur.Cgroup.CPUQuotaCores > 0
+	culprits := a.TopCPU(1)
+	linked := len(culprits) > 0 && culprits[0].LastCPUKnown && onCore(culprits[0].LastCPU, peaks)
+	if quota && !linked {
+		return nil
+	}
+
 	names := make([]string, 0, len(peaks))
+	busiest := peaks[0].Busy
 	for _, p := range peaks {
 		names = append(names, fmt.Sprintf("CPU%d", p.ID))
+		if p.Busy > busiest {
+			busiest = p.Busy
+		}
 	}
-	headline := fmt.Sprintf("%s 已经跑满（%.0f%%），整机平均却只有 %.1f%%",
-		strings.Join(names, "、"), peaks[0].Busy, a.cpu.Busy)
+	// The headline percentage is the fullest core of them all, so it matches
+	// "已经跑满" rather than whichever core happened to have the lowest id.
+	headline := a.msg("%s 已经跑满（%.0f%%），整机平均却只有 %.1f%%",
+		"%s is saturated (%.0f%%) while the machine average is only %.1f%%",
+		strings.Join(names, a.msg("、", ", ")), busiest, a.cpu.Busy)
 
 	evidence := []Evidence{
-		{Source: "plumb", Detail: fmt.Sprintf("%d 个核心中有 %d 个被单个线程占满，其余核心空闲",
-			len(loads), len(peaks))},
-		{Source: "/proc/stat", Detail: fmt.Sprintf("整机 busy=%.1f%% user=%.1f%% system=%.1f%%",
+		{Source: "plumb", Detail: a.msg("%d 个核心中有 %d 个被单个线程占满，其余核心空闲",
+			"%d of %d cores are held solid by a single thread; the rest are idle",
+			len(peaks), len(loads))},
+		{Source: "/proc/stat", Detail: a.msg("整机 busy=%.1f%% user=%.1f%% system=%.1f%%",
+			"machine busy=%.1f%% user=%.1f%% system=%.1f%%",
 			a.cpu.Busy, a.cpu.User, a.cpu.System)},
 	}
 	for _, p := range peaks {
@@ -255,16 +337,56 @@ func (a *analysis) ruleCoreSkew() *Finding {
 				p.ID, p.Busy, p.IOWait, p.Steal),
 		})
 	}
+	if linked {
+		evidence = append(evidence, Evidence{
+			Source: "/proc/<pid>/stat",
+			Detail: a.msg("PID %d 上一次运行在 CPU%d 上（字段 39 processor）—— 与上面那个满核对得上，这是指认它的依据",
+				"PID %d last ran on CPU%d (field 39, processor) — it matches the saturated core "+
+					"above, which is what licenses naming it",
+				culprits[0].PID, culprits[0].LastCPU),
+		})
+	}
+	if quota {
+		evidence = append(evidence, Evidence{
+			Source: "plumb",
+			Detail: a.msg("逐核行来自 /proc/stat，是宿主机的视图；本 cgroup 只有 %s 配额，"+
+				"所以那个满核未必是本工作负载在用 —— 已知的只是元凶进程最后确实落在它上面",
+				"The per-core lines come from /proc/stat and describe the host; this cgroup has "+
+					"only %s of quota, so the saturated core may not be one this workload runs on "+
+					"— all that is known is that the culprit process was last seen on it",
+				fmt.Sprintf("%s%s", trimFloat(a.cur.Cgroup.CPUQuotaCores), a.msg(" 核", " cores"))),
+		})
+	}
 
 	return &Finding{
-		Area:     "单核跑满",
+		Area:     a.msg("单核跑满", "one core saturated"),
 		Severity: SeverityWatch,
 		Headline: headline,
 		Evidence: evidence,
 		Culprits: a.TopCPU(1),
-		Advice: "单个核心满负荷而其他核心空闲，说明瓶颈是“一个线程干完全部活”，" +
-			"不是 CPU 不够。加核心对这种结构没有任何帮助 —— 要动的是并发方式：" +
-			"多开 worker 进程、把请求分片，或者把这个组件从单线程模型里拆出来。" +
-			"反过来，如果这台机器还要继续跑别的服务，被占满的那个核心也会让它们一起变慢。",
+		Advice: a.msg(
+			"单个核心满负荷而其他核心空闲，说明瓶颈是“一个线程干完全部活”，"+
+				"不是 CPU 不够。加核心对这种结构没有任何帮助 —— 要动的是并发方式："+
+				"多开 worker 进程、把请求分片，或者把这个组件从单线程模型里拆出来。"+
+				"反过来，如果这台机器还要继续跑别的服务，被占满的那个核心也会让它们一起变慢。",
+			"One core saturated while the others idle means the bottleneck is \"one thread doing "+
+				"all the work\", not a shortage of CPU. Adding cores does nothing for this shape — "+
+				"what has to change is the concurrency: more worker processes, sharded requests, or "+
+				"this component pulled out of a single-threaded model. Conversely, if this machine "+
+				"also runs other services, the saturated core will slow them down with it."),
 	}
+}
+
+// onCore reports whether a CPU number is one of the cores that peaked.
+//
+// This is the whole of the link between a per-core reading and a process: the
+// kernel says which core the task last ran on, and the report says which cores
+// are full. Matching them is what makes an accusation a measurement.
+func onCore(cpu int, peaks []probe.CoreLoad) bool {
+	for _, p := range peaks {
+		if p.ID == cpu {
+			return true
+		}
+	}
+	return false
 }

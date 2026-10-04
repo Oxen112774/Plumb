@@ -1,81 +1,137 @@
-plumb · 服务器卡顿归因
-prod-db-01 · Linux 5.15.0-91-generic · 4 核 · 已运行 12 天 0 小时
-采样 2026-09-27 22:05:25 · 间隔 1s · 两次采样
+plumb │ prod-db-01 │ Linux 5.15.0-91-generic │ 2 核心 │ up 12 天 0 小时
+load 2.21 1.90 1.44 | 1.10/core
+2026-10-03 20:43:17 | 1s 两次采样
 
-判定（7 项）
+  CPU ████▊░░░░░░░░░░░░░░░  24.6%
+  MEM ▌░░░░░░░░░░░░░░░░░░░   3.6%  (some 9.2%)
+  IO  ████▊░░░░░░░░░░░░░░░  24.5%  (some 44.8%)
 
-  !!!  磁盘 IO
-      磁盘让整机停摆 —— 过去 10 秒有 17.4% 的时间所有任务都在等它
+线程 3/13 个处于 D 状态（不可中断，kill 不掉）
+  PID     TID     COMM             WCHAN                    STATE 内核栈判定
+  ──────────────────────────────────────────────────────────────────────
+  1234    1240    mysqld           jbd2_log_wait_commit     D     ext4/jbd2 日志 ← jbd2_log_wait_commit
+  1234    1241    mysqld           io_schedule              D     NFS/RPC ← nfs_wait_bit_killable
+  3000    3001    node             filemap_fault            D     cgroup 内存回收 ← shrink_node_memcg
+
+判定 (9)
+
+  !!! 磁盘 IO
+      磁盘让整机停摆 —— 过去 10 秒有 24.5% 的时间所有任务都在等它
 
       元凶进程
         PID 1234    mysqld             [mysql]
                      读 40.1 MiB/s，写 976.6 KiB/s
-                     /usr/sbin/mysqld --defaults-file=/etc/mysql/my.cnf
 
       证据
-        /proc/pressure/io  full avg10=17.40 avg60=12.10 avg300=6.80
-        /proc/pressure/io  some avg10=42.10（至少一个任务在等磁盘）
+        /sys/fs/cgroup/io.pressure full avg10=24.50 avg60=18.30 avg300=9.10
+        /sys/fs/cgroup/io.pressure some avg10=44.80（至少一个任务在等磁盘）
+        /proc/pressure/io  full avg10=17.40 some avg10=42.10（系统级，含其他租户）
 
       怎么办
         先确认是谁在写：pidstat -d 1 或 iotop -o。数据库重点看全表扫描、
         fsync 过频、刷盘策略；日志服务重点看级别和同步落盘。多数情况下降低
         队列深度（合并小写、延长 write-back）比换盘更有效。
 
-   !   内存
-      内存不足 —— 过去 10 秒有 3.2% 的时间系统在等内存回收
+   !  内存
+      内存不足 —— 过去 10 秒有 3.6% 的时间系统在等内存回收
 
       元凶进程
         PID 3000    node               [app]
                      常驻内存 4.6 GiB
-                     node /home/app/server.js --port=8080
         PID 1234    mysqld             [mysql]
                      常驻内存 2.7 GiB
-                     /usr/sbin/mysqld --defaults-file=/etc/mysql/my.cnf
 
       证据
-        /proc/pressure/memory full avg10=3.20 avg60=1.40 avg300=0.60
+        /sys/fs/cgroup/memory.pressure full avg10=3.60 avg60=2.40 avg300=1.10
         /proc/meminfo      MemTotal=15.6 GiB MemAvailable=5.8 GiB SwapUsed=192.5 MiB
+        /proc/pressure/memory full avg10=3.20 some avg10=8.60（系统级，含其他租户）
 
       怎么办
         内存压力表现为回收停顿，不是单纯的百分比高。看下面谁的工作集最大；
         如果能限制它的常驻内存就先限制，否则只能加内存。注意 swap
         一旦被大量使用，响应时间会上升一个数量级。
 
-   !   被堵住的线程
+   !  内存配额
+      cgroup 内存限额已用 93.8%（7.5 GiB / 8.0 GiB）
+
+      元凶进程
+        PID 3000    node               [app]
+                     常驻内存 4.6 GiB
+        PID 1234    mysqld             [mysql]
+                     常驻内存 2.7 GiB
+
+      证据
+        /sys/fs/cgroup/memory.max 限额 8.0 GiB，当前用量 7.5 GiB，使用率 93.8%
+        /sys/fs/cgroup/memory.events oom=1 —— 已经 1 次触发 OOM killer（层级汇总，含子 cgroup）
+        /sys/fs/cgroup/memory.events oom_kill=1 —— 这个 cgroup 自创建以来已被 OOM 杀过 1 次 ——
+                           配额不够是已经被发生过的事，不是预测
+
+      怎么办
+        配额到顶不是变慢，是 OOM kill：内核会直接杀掉 cgroup
+        里最大的进程。先看是谁在涨（进程列表按常驻排序）；是泄漏就堵泄漏，
+        是业务量到了就调大限额 —— 调大前先确认宿主机上真的有那么多内存，
+        否则只是把死期换成了宿主机上的争抢。
+
+   !  网络
+      重传率 3.0%，accept 队列丢弃了 12 个连接 —— 慢的可能不是这台机器
+
+      证据
+        /proc/net/snmp     本窗口发送 6000000 段，重传 180000 段（3.0%）
+        /proc/net/netstat  ListenDrops=12，其中 ListenOverflows=10（队列满）
+        /proc/net/netstat  SyncookiesFailed=2 —— 收到的 ACK 对不上发出去的 cookie，
+                           常见于伪造来源地址的连接风暴
+
+      怎么办
+        accept 队列在丢连接：应用收不过来（accept 循环慢）或 backlog
+        太小。ss -lnt 看 Recv-Q/Send-Q；调大 net.core.somaxconn 和应用的
+        backlog 之前，先确认应用不是卡在别的资源上 ——
+        队列满通常只是别处慢的最后一环。重传问题另见 netstat -s | grep -i
+        retrans。
+
+   !  被堵住的线程
       有 3 个线程被内核堵住，动不了也杀不掉
 
       元凶进程
         PID 1234    mysqld
                      线程 1240：等 ext4 日志提交  [jbd2_log_wait_commit]
+                       内核栈：ext4/jbd2 日志（依据 jbd2_log_wait_commit）
                      线程 1241：等磁盘 IO 完成  [io_schedule]
+                       内核栈：NFS/RPC（依据 nfs_wait_bit_killable）
                      持有文件：
                        /var/lib/mysql/ib_logfile0
                        /var/lib/mysql/ibdata1
                        /var/lib/mysql/prod/orders.ibd
-                     /usr/sbin/mysqld --defaults-file=/etc/mysql/my.cnf
         PID 3000    node
                      线程 3001：缺页，要从磁盘读回来  [filemap_fault]
+                       内核栈：cgroup 内存回收（依据 shrink_node_memcg）
                      持有文件：
                        /home/app/server.js
                        /var/log/app/app.log
                        /var/lib/app/session.db
-                     node /home/app/server.js --port=8080
 
       证据
-        /proc/<pid>/task   全机 13 个线程中 3 个处于 D 状态（不可中断睡眠，信号无法送达）
+        /proc/<pid>/task   全机 3 个线程中 13 个处于 D 状态（不可中断睡眠，信号无法送达）
         /proc/<pid>/wchan  wchan 给出线程此刻停在内核的哪个函数上，即它在等什么
-        /proc/<pid>/fd     被堵住的进程持有的普通文件；socket、pipe、anon_inode 与 /dev 已滤掉
-        plumb              D 状态是某一瞬间的采样：一两个通常是正常的同步写，数量持续偏高才说明存储真的顶不住
+        /proc/<pid>/fd     被堵住的进程持有的普通文件；socket、pipe、anon_inode 与 /
+                           dev 已滤掉
+        plumb              D 状态是某一瞬间的采样：一两个通常是正常的同步写，
+                           数量持续偏高才说明存储真的顶不住
+        /proc/<pid>/stack  卡在 NFS：在等一个网络文件系统的服务器回应（不在本机，
+                           重启本机无效）；卡在 cgroup 的内存回收：容器限额太小，
+                           内核在限额内反复回收；卡在 ext4 的日志提交（jbd2）：
+                           文件系统在等它自己的事务落盘
         /proc/pressure/io  full avg10=17.40：与上面的被堵线程互相印证
 
       怎么办
-        ext4 的日志必须先落盘，之后的写才算数。日志提交慢通常是小文件同步
-        写太多：把 fsync 改成批量提交，或把日志放到更快的盘上。D
-        状态的线程连 SIGKILL 都不会生效 —— 它会挂到 IO 完成为止，
-        所以碰到杀不掉的进程，别反复 kill：先看它卡在哪个内核函数、
-        手里拿着哪个文件，那才是真正在等的东西。
+        这台机器没有问题 —— 它在等远端。去看 NFS 服务器和中间的网络：
+        服务器是不是挂了、网络是不是断了、端口映射是不是变了。本机上能做的
+        只有 umount -f -l 把挂载点摘掉；但先确认这确实是 NFS
+        而不是本地磁盘 —— 这个判断错了就是白折腾一次。重启本机通常也会卡在
+        关机流程里，等到 IO 返回才继续。D 状态的线程连 SIGKILL 都不会生效
+        —— 它会挂到 IO 完成为止，所以碰到杀不掉的进程，别反复 kill：
+        先看它卡在哪个内核函数、手里拿着哪个文件，那才是真正在等的东西。
 
-   ·   CPU 被抢占
+   ·  CPU 被抢占
       宿主机抢走了 5.0% 的 CPU
 
       证据
@@ -87,16 +143,14 @@ prod-db-01 · Linux 5.15.0-91-generic · 4 核 · 已运行 12 天 0 小时
         部分损耗不在你的程序里 —— 优化代码没有意义，应当换机型或联系服务商，
         并要求查看宿主机超售比例。
 
-   ·   交换分区
+   ·  交换分区
       交换分区已用 9.4%（192.5 MiB）
 
       元凶进程
         PID 3000    node               [app]
                      常驻内存 4.6 GiB
-                     node /home/app/server.js --port=8080
         PID 1234    mysqld             [mysql]
                      常驻内存 2.7 GiB
-                     /usr/sbin/mysqld --defaults-file=/etc/mysql/my.cnf
 
       证据
         /proc/meminfo      SwapTotal=2.0 GiB SwapFree=1.8 GiB
@@ -106,18 +160,22 @@ prod-db-01 · Linux 5.15.0-91-generic · 4 核 · 已运行 12 天 0 小时
         时间上升一个数量级，而且往往表现为“随机变慢”，
         很难在日志里看出来。先找出工作集超标的进程。
 
-   ·   单核跑满
+   ·  单核跑满
       CPU0 已经跑满（99%），整机平均却只有 42.5%
 
       元凶进程
         PID 3000    node               [app]
                      占用 1.1 核
-                     node /home/app/server.js --port=8080
 
       证据
-        plumb              4 个核心中有 1 个被单个线程占满，其余核心空闲
+        plumb              1 个核心中有 4 个被单个线程占满，其余核心空闲
         /proc/stat         整机 busy=42.5% user=25.0% system=5.0%
         /proc/stat         cpu0 busy=99.0% iowait=0.0% steal=5.0%
+        /proc/<pid>/stat   PID 3000 上一次运行在 CPU0 上（字段 39 processor）——
+                           与上面那个满核对得上，这是指认它的依据
+        plumb              逐核行来自 /proc/stat，是宿主机的视图；本 cgroup 只有 2 核
+                           配额，所以那个满核未必是本工作负载在用 ——
+                           已知的只是元凶进程最后确实落在它上面
 
       怎么办
         单个核心满负荷而其他核心空闲，说明瓶颈是“一个线程干完全部活”，
@@ -126,13 +184,12 @@ prod-db-01 · Linux 5.15.0-91-generic · 4 核 · 已运行 12 天 0 小时
         反过来，如果这台机器还要继续跑别的服务，
         被占满的那个核心也会让它们一起变慢。
 
-   ·   脏页
+   ·  脏页
       脏页堆积 375.0 MiB，内核即将被迫同步刷盘
 
       元凶进程
         PID 1234    mysqld             [mysql]
                      读 40.1 MiB/s，写 976.6 KiB/s
-                     /usr/sbin/mysqld --defaults-file=/etc/mysql/my.cnf
 
       证据
         /proc/meminfo      Dirty=375.0 MiB Writeback=17.6 MiB
@@ -148,10 +205,12 @@ prod-db-01 · Linux 5.15.0-91-generic · 4 核 · 已运行 12 天 0 小时
   CPU      繁忙 42.5%   用户 25.0%   系统 5.0%   等磁盘 7.5%   被抢占 5.0%
   核心     CPU0 99%  CPU1 26%  CPU2 23%  CPU3 22%
   内存     已用 63.1%（9.9 GiB / 15.6 GiB）   交换 9.4%
-  负载     load1 2.21，4 核，每核 0.55
+  负载     load1 2.21，2 核，每核 1.10
   线程     共 13 个，其中 3 个处于 D 状态（不可中断，kill 不掉）
-  压力     cpu some 8.20%   io full 17.40%   memory full 3.20%
+  限额     CPU 2 核（宿主机 4 核）   内存配额 8.0 GiB，已用 93.8%
+  网络     发包 600万 段，重传 3.0%，accept 队列丢弃 12 个连接
+  压力     cpu some 24.60%   io full 24.50%   memory full 3.60%（本 cgroup）
+  压力     cpu some 8.20%   io full 17.40%   memory full 3.20%（系统级，含其他租户）
 
 未能测到（这些项不参与判定）
   · disk space for /: probe: not supported on this platform
-

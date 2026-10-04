@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/Oxen112774/plumb/internal/diagnose"
+	"github.com/Oxen112774/plumb/internal/i18n"
 	"github.com/Oxen112774/plumb/internal/probe"
 )
 
@@ -30,7 +31,7 @@ func sampleReport() diagnose.Report {
 }
 
 func TestComposeLeadsWithTheWorstFinding(t *testing.T) {
-	m := Compose(sampleReport())
+	m := Compose(sampleReport(), i18n.ZH)
 
 	// What matters is that the right script was selected; asserting on its
 	// wording would make every tone edit a test edit.
@@ -55,7 +56,7 @@ func TestComposeHealthysaysNothingAboutUrgency(t *testing.T) {
 	r := sampleReport()
 	r.Findings = nil
 
-	m := Compose(r)
+	m := Compose(r, i18n.ZH)
 	if m.Urgency != "" {
 		t.Errorf("urgency = %q, want none on a healthy machine", m.Urgency)
 	}
@@ -83,7 +84,7 @@ func TestMessageNeverClaimsAnAction(t *testing.T) {
 		"healthy":  healthy,
 	} {
 		var out strings.Builder
-		if err := Write(&out, r, false, nil); err != nil {
+		if err := Write(&out, r, false, nil, i18n.ZH); err != nil {
 			t.Fatalf("%s: Write: %v", name, err)
 		}
 		text := out.String()
@@ -104,7 +105,7 @@ func TestMessageNeverClaimsAnAction(t *testing.T) {
 // a strange way to respect their time.
 func TestHeaderCarriesTheSeverity(t *testing.T) {
 	var b strings.Builder
-	if err := Write(&b, sampleReport(), false, nil); err != nil {
+	if err := Write(&b, sampleReport(), false, nil, i18n.ZH); err != nil {
 		t.Fatalf("Write: %v", err)
 	}
 	header := strings.SplitN(b.String(), "\n", 2)[0]
@@ -118,7 +119,7 @@ func TestHeaderCarriesTheSeverity(t *testing.T) {
 	r := sampleReport()
 	r.Findings = nil
 	b.Reset()
-	if err := Write(&b, r, false, nil); err != nil {
+	if err := Write(&b, r, false, nil, i18n.ZH); err != nil {
 		t.Fatalf("Write: %v", err)
 	}
 	if header := strings.SplitN(b.String(), "\n", 2)[0]; !strings.Contains(header, "正常") {
@@ -132,7 +133,7 @@ func TestHeaderCarriesTheSeverity(t *testing.T) {
 func TestMessageStaysShort(t *testing.T) {
 	lines := func(r diagnose.Report) []string {
 		var b strings.Builder
-		if err := Write(&b, r, false, nil); err != nil {
+		if err := Write(&b, r, false, nil, i18n.ZH); err != nil {
 			t.Fatalf("Write: %v", err)
 		}
 		return strings.Split(strings.TrimRight(b.String(), "\n"), "\n")
@@ -162,7 +163,7 @@ func TestSplitNoteSeparatesHeldFiles(t *testing.T) {
 		"线程 1241：等磁盘 IO 完成  [io_schedule]\n" +
 		"持有文件：\n  /var/lib/mysql/ib_logfile0\n  /var/lib/mysql/ibdata1\n"
 
-	detail, held := splitNote(note)
+	detail, held := splitNote(note, i18n.ZH)
 
 	if !strings.HasPrefix(detail, "线程 1240：") {
 		t.Errorf("detail = %q, want the first thread", detail)
@@ -183,7 +184,7 @@ func TestSplitNoteSeparatesHeldFiles(t *testing.T) {
 }
 
 func TestSplitNoteWithoutFiles(t *testing.T) {
-	detail, held := splitNote("读 40.1 MiB/s，写 976.6 KiB/s")
+	detail, held := splitNote("读 40.1 MiB/s，写 976.6 KiB/s", i18n.ZH)
 	if detail != "读 40.1 MiB/s，写 976.6 KiB/s" {
 		t.Errorf("detail = %q", detail)
 	}
@@ -195,11 +196,11 @@ func TestSplitNoteWithoutFiles(t *testing.T) {
 func TestJoinAllSuppliesTheMissingFullStop(t *testing.T) {
 	// A headline is a fragment; run straight into the next fact it produced
 	// "…都在等它最直接的是 mysqld".
-	got := joinAll([]string{"都在等它", "最直接的是 mysqld。"})
+	got := joinAll([]string{"都在等它", "最直接的是 mysqld。"}, i18n.ZH)
 	if want := "都在等它。最直接的是 mysqld。"; got != want {
 		t.Errorf("joinAll = %q, want %q", got, want)
 	}
-	if got := joinAll([]string{"已经结束。", "下一句"}); got != "已经结束。下一句" {
+	if got := joinAll([]string{"已经结束。", "下一句"}, i18n.ZH); got != "已经结束。下一句" {
 		t.Errorf("joinAll added a stop where there already was one: %q", got)
 	}
 }
@@ -223,7 +224,7 @@ func TestChangeReportsAppearWorsenAndClear(t *testing.T) {
 	prev := State{"内存": diagnose.SeverityWatch, "脏页": diagnose.SeverityWatch}
 	cur := State{"内存": diagnose.SeverityCritical, "磁盘 IO": diagnose.SeverityWarning}
 
-	got := Change(prev, cur)
+	got := Change(prev, cur, i18n.ZH)
 	for _, want := range []string{"新出现 磁盘 IO", "变严重 内存", "已经好了 脏页"} {
 		if !strings.Contains(got, want) {
 			t.Errorf("Change = %q, want it to mention %q", got, want)
@@ -231,9 +232,21 @@ func TestChangeReportsAppearWorsenAndClear(t *testing.T) {
 	}
 }
 
+// A finding that eased off is still news. Without this the watcher stays silent
+// through the whole recovery and only speaks once the finding disappears.
+func TestChangeReportsAnImprovement(t *testing.T) {
+	prev := State{"磁盘 IO": diagnose.SeverityCritical}
+	cur := State{"磁盘 IO": diagnose.SeverityWarning}
+
+	got := Change(prev, cur, i18n.ZH)
+	if !strings.Contains(got, "已经好转 磁盘 IO") {
+		t.Errorf("Change = %q, want it to report the easing off", got)
+	}
+}
+
 func TestChangeIsEmptyWhenNothingMoved(t *testing.T) {
 	s := State{"内存": diagnose.SeverityWarning}
-	if got := Change(s, s); got != "" {
+	if got := Change(s, s, i18n.ZH); got != "" {
 		t.Errorf("Change = %q, want silence on an unchanged machine", got)
 	}
 }

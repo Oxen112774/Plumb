@@ -59,7 +59,15 @@ func ReadPressure(r Root) Pressure {
 }
 
 func readPSI(r Root, name string) (PSIStall, error) {
-	data, err := r.ReadFile("proc/pressure/" + name)
+	return readPSIAt(r, "proc/pressure/"+name)
+}
+
+// readPSIAt parses a PSI file at an arbitrary path beneath the root. The
+// per-cgroup files under /sys/fs/cgroup use the same format as the system-wide
+// ones, so the parser is shared — two parsers for one format is how the two
+// drift apart.
+func readPSIAt(r Root, path string) (PSIStall, error) {
+	data, err := r.ReadFile(path)
 	if err != nil {
 		return PSIStall{}, err
 	}
@@ -84,7 +92,7 @@ func readPSI(r Root, name string) (PSIStall, error) {
 		return nil
 	})
 	if err != nil {
-		return PSIStall{}, fmt.Errorf("parse proc/pressure/%s: %w", name, err)
+		return PSIStall{}, fmt.Errorf("parse %s: %w", path, err)
 	}
 	return st, nil
 }

@@ -6,7 +6,9 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/Oxen112774/plumb/internal/i18n"
 	"github.com/Oxen112774/plumb/internal/knowledge"
+	"github.com/Oxen112774/plumb/internal/report"
 )
 
 // -why touches nothing but the compiled-in tree: no sampling, no /proc, no
@@ -14,7 +16,7 @@ import (
 // this test is what keeps it that way.
 func TestWhyNeedsNothingButTheTree(t *testing.T) {
 	var buf bytes.Buffer
-	if err := writeWhy(&buf, "io_schedule", false); err != nil {
+	if err := writeWhy(&buf, "io_schedule", false, i18n.ZH); err != nil {
 		t.Fatalf("writeWhy: %v", err)
 	}
 	out := buf.String()
@@ -27,7 +29,7 @@ func TestWhyNeedsNothingButTheTree(t *testing.T) {
 
 func TestCatalogueListsEveryLeaf(t *testing.T) {
 	var buf bytes.Buffer
-	if err := writeWhy(&buf, "", false); err != nil {
+	if err := writeWhy(&buf, "", false, i18n.ZH); err != nil {
 		t.Fatalf("writeWhy: %v", err)
 	}
 	out := buf.String()
@@ -45,14 +47,14 @@ func TestCatalogueListsEveryLeaf(t *testing.T) {
 func TestWhyNeverOverflowsThePage(t *testing.T) {
 	check := func(name, needle string) {
 		var buf bytes.Buffer
-		if err := writeWhy(&buf, needle, false); err != nil {
+		if err := writeWhy(&buf, needle, false, i18n.ZH); err != nil {
 			t.Fatalf("%s: %v", name, err)
 		}
 		for i, line := range strings.Split(buf.String(), "\n") {
 			// The two columns of slack absorb the wrapper's line-start
 			// punctuation rule, which prefers a one-glyph overflow to letting a
 			// closing mark open a line.
-			if w := displayWidth(line); w > whyWidth+2 {
+			if w := report.DisplayWidth(line); w > whyWidth+2 {
 				t.Errorf("%s: line %d is %d columns, over the %d budget:\n%s",
 					name, i+1, w, whyWidth, line)
 			}
@@ -70,7 +72,7 @@ func TestWhyNeverOverflowsThePage(t *testing.T) {
 // teach a reader to trust output that means nothing.
 func TestWhyReportsAMissAsAnError(t *testing.T) {
 	var buf bytes.Buffer
-	err := writeWhy(&buf, "zzzz_not_a_symbol", false)
+	err := writeWhy(&buf, "zzzz_not_a_symbol", false, i18n.ZH)
 	if err == nil {
 		t.Fatal("a key that is not in the tree was reported as found")
 	}

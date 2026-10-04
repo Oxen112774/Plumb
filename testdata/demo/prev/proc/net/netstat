@@ -1,0 +1,4 @@
+TcpExt: SyncookiesSent SyncookiesRecv SyncookiesFailed EmbryonicRsts PruneCalled RcvPruned OfoPruned TW TWRecycled TWKilled DelayedACKs DelayedACKLost ListenOverflows ListenDrops TCPHPHits TCPPureAcks TCPHPAcks TCPSackRecovery TCPLostRetransmit TCPFastRetrans TCPSlowStartRetrans TCPTimeouts TCPSpuriousRTOs TCPAbortOnClose TCPAbortOnTimeout TCPMemoryPressures TCPBacklogDrop
+TcpExt: 0 0 12 412 12043 0 0 812004 0 12 41204 3312 80 100 812004551 412004510 312004001 12043 3312 44120 12043 900 12 412 1204 0 0
+IpExt: InNoRoutes InTruncatedPkts InMcastPkts OutMcastPkts InBcastPkts OutBcastPkts InOctets OutOctets InMcastOctets OutMcastOctets InBcastOctets OutBcastOctets InCsumErrors InNoECTPkts InECT1Pkts InECT0Pkts InCEPkts ReasmOverlaps
+IpExt: 0 0 0 0 12043 0 190045001100 812004551000 0 0 441200 0 0 984312004 0 0 0 0
