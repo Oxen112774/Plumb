@@ -312,12 +312,24 @@ func Analyze(prev, cur probe.Snapshot, opts Options) Report {
 	if opts.Top <= 0 {
 		opts.Top = 3
 	}
+	// The nominal interval is what the caller *asked* for; the real gap
+	// between the two snapshots is what the counters were actually measured
+	// over. probe.Take walks every /proc entry and reads four files per pid,
+	// so on a loaded machine the sampling itself can take a second or more —
+	// and it takes longest exactly when the machine is saturated, which is
+	// when this tool matters most. Dividing by the nominal interval then
+	// reports "10 cores busy" on a machine doing 1 core of work.
+	// Both snapshots carry the time they were taken, so use the real gap.
+	interval := opts.Interval
+	if d := cur.At.Sub(prev.At); d > 0 {
+		interval = d
+	}
 	a := &analysis{
 		prev:     prev,
 		cur:      cur,
-		interval: opts.Interval,
+		interval: interval,
 		top:      opts.Top,
-		hasPrev:  !prev.At.IsZero() && opts.Interval > 0,
+		hasPrev:  !prev.At.IsZero() && interval > 0,
 		th:       opts.Thresholds.WithDefaults(),
 		lang:     opts.Lang,
 	}
@@ -332,7 +344,10 @@ func Analyze(prev, cur probe.Snapshot, opts Options) Report {
 
 	rep := Report{
 		StartedAt:    cur.At,
-		Interval:     opts.Interval,
+		// The measured gap, not the requested one — this string is printed
+		// as the sample window, so showing the nominal value there would
+		// contradict every rate computed from the real one.
+		Interval:     interval,
 		System:       cur.System,
 		CPUUsage:     a.cpu,
 		Cores:        cur.CoreLoads(prev),
@@ -411,6 +426,13 @@ func (a *analysis) pressure() probe.Pressure {
 // finding's source must say which file the number was read from, and with two
 // possible PSI locations the label is the only thing keeping the claim
 // checkable.
+//
+// The cgroup branch names the file inside the hierarchy root. The numbers
+// themselves are read from this process's own cgroup directory (see
+// probe.cgroupV2Base), so a pod should be pointed at its own file — but the
+// root is where the file exists on every v2 host, including the ones where
+// the path is not resolvable, and a source label that says "no such file" is
+// worse than one that points at a readable sibling.
 func (a *analysis) pressureSource(name string) string {
 	if c := a.cur.Cgroup; c.V2 && c.Pressure.Supported {
 		return "/sys/fs/cgroup/" + name + ".pressure"

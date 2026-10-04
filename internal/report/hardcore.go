@@ -509,8 +509,11 @@ func overviewLinesLang(r diagnose.Report, t i18n.Lang) []string {
 
 	var out []string
 	if r.CPUMeasured {
+		// Same reasoning as the Chinese line: "busy" excludes iowait and
+		// steal, and the separator says so rather than leaving the reader
+		// to add five numbers into something over 100.
 		out = append(out, fmt.Sprintf(
-			"CPU      busy %.1f%%   user %.1f%%   sys %.1f%%   iowait %.1f%%   steal %.1f%%",
+			"CPU      busy %.1f%% (user %.1f%% sys %.1f%%) | not counted as busy: iowait %.1f%% steal %.1f%%",
 			r.CPUUsage.Busy, r.CPUUsage.User, r.CPUUsage.System,
 			r.CPUUsage.IOWait, r.CPUUsage.Steal))
 	}

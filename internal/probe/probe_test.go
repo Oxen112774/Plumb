@@ -1,8 +1,11 @@
 package probe
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
+	"unicode/utf8"
 )
 
 // A process can name itself anything, including a string containing spaces
@@ -212,14 +215,44 @@ func TestCoreLoadComputesIOWaitAndSteal(t *testing.T) {
 	if len(loads) != 1 {
 		t.Fatalf("got %d loads, want 1", len(loads))
 	}
-	if loads[0].Busy != 80 {
-		t.Errorf("busy = %v, want 80", loads[0].Busy)
+	// Busy counts only real work: user 40 out of a 100-jiffy window.
+	// IOWait and Steal are deliberately excluded — 40+30+10=80 would say
+	// "this core is 80% busy" on a machine whose CPUs spent half the
+	// window waiting for a disk they were not allowed to run on, and it
+	// would contradict the steal finding printed two lines above.
+	if loads[0].Busy != 40 {
+		t.Errorf("busy = %v, want 40 (iowait and steal must not count as busy)", loads[0].Busy)
 	}
 	if loads[0].IOWait != 30 {
 		t.Errorf("iowait = %v, want 30", loads[0].IOWait)
 	}
 	if loads[0].Steal != 10 {
 		t.Errorf("steal = %v, want 10", loads[0].Steal)
+	}
+}
+
+// Busy must stay in [0, Total] even when the component counters are
+// inconsistent. These are uint64, so a subtraction that goes below zero
+// wraps to ~1.8e19 and every downstream percentage becomes garbage.
+func TestBusyDoesNotUnderflow(t *testing.T) {
+	cases := []struct {
+		name string
+		in   CPUTimes
+		want uint64
+	}{
+		{"idle only", CPUTimes{Idle: 100}, 0},
+		{"idle and iowait", CPUTimes{Idle: 60, IOWait: 40}, 0},
+		{"steal only", CPUTimes{Steal: 100}, 0},
+		{"user only", CPUTimes{User: 40, Idle: 60}, 40},
+		{"user and system", CPUTimes{User: 10, System: 20, Idle: 70}, 30},
+		// iowait and steal are part of Total, so these are real work times
+		// being excluded, not an underflow: 100 total, 40 of it user.
+		{"excludes iowait and steal", CPUTimes{User: 40, IOWait: 30, Steal: 10, Idle: 20}, 40},
+	}
+	for _, c := range cases {
+		if got := c.in.Busy(); got != c.want {
+			t.Errorf("%s: Busy = %v, want %v", c.name, got, c.want)
+		}
 	}
 }
 
@@ -476,5 +509,99 @@ func TestReadWChanTreatsZeroAsRunning(t *testing.T) {
 	}
 	if got := readWChan(root, "proc/1234/task/1234/wchan"); got != "" {
 		t.Errorf("wchan = %q, want empty when the kernel reports 0", got)
+	}
+}
+
+// When /proc/<pid>/status cannot be read, UID must not fall back to 0.
+// 0 is a real uid — root's — so a zero value makes an ordinary user's
+// process get reported as root-owned. The field points at who to
+// investigate, so "did not read" and "read root" must stay distinct.
+func TestProcessUIDIsNotRootWhenStatusIsUnreadable(t *testing.T) {
+	dir := t.TempDir()
+	// /proc/<pid>/stat present, /proc/<pid>/status absent — which is what a
+	// process exiting mid-scan, a hidepid mount, or a kernel thread hidden
+	// by a container's pid namespace all look like.
+	stat := "4242 (myproc) S 1 4242 4242 0 -1 4194560 100 0 0 0 " +
+		"111 222 0 0 20 0 1 0 900 1234 5678 18446744073709551615 " +
+		"1 1 1 1 1 1 0 0 0 0 0 0 0 0 0 0 0 0 17 2 0 0 0 0 0\n"
+	procdir := filepath.Join(dir, "proc", "4242")
+	if err := os.MkdirAll(procdir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(procdir, "stat"), []byte(stat), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	p, err := readProcess(NewRoot(dir), 4242)
+	if err != nil {
+		t.Fatalf("readProcess: %v", err)
+	}
+	if p.UID != -1 {
+		t.Fatalf("UID = %d, want -1 when status is unreadable (0 would be indistinguishable from root)", p.UID)
+	}
+	if p.User != "" {
+		t.Errorf("User = %q, want empty — an unreadable uid must not print as a user name", p.User)
+	}
+}
+
+// A real uid 0 must still be reported as root. The fix for the case above
+// must not turn "the process genuinely belongs to root" into silence.
+func TestProcessUIDZeroIsStillRoot(t *testing.T) {
+	dir := t.TempDir()
+	procdir := filepath.Join(dir, "proc", "4242")
+	if err := os.MkdirAll(procdir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	stat := "4242 (sshd) S 1 4242 4242 0 -1 4194560 100 0 0 0 " +
+		"111 222 0 0 20 0 1 0 900 1234 5678 18446744073709551615 " +
+		"1 1 1 1 1 1 0 0 0 0 0 0 0 0 0 0 0 0 17 2 0 0 0 0 0\n"
+	if err := os.WriteFile(filepath.Join(procdir, "stat"), []byte(stat), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// parseStatusUID cuts on the "Uid:" prefix, so the field separators have
+	// to be real tabs — strings.Fields would see one token otherwise.
+	status := "Name:\tsshd\nUid:\t0\t0\t0\t0\n"
+	if err := os.WriteFile(filepath.Join(procdir, "status"), []byte(status), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	p, err := readProcess(NewRoot(dir), 4242)
+	if err != nil {
+		t.Fatalf("readProcess: %v", err)
+	}
+	if p.UID != 0 {
+		t.Fatalf("UID = %d, want 0 for a genuine root process", p.UID)
+	}
+}
+
+// Truncation must not split a multi-byte character. The cap used to be
+// applied to bytes, so a Chinese command line produced invalid UTF-8, which
+// json.Marshal silently replaces with U+FFFD and terminals print as garbage.
+func TestParseCmdlineCapDoesNotSplitUTF8(t *testing.T) {
+	// 200 three-byte characters is 600 bytes — past the 160-character cap,
+	// and a byte-oriented cut at 160 lands inside a character every time
+	// except by luck.
+	arg := strings.Repeat("密", 200)
+	got := parseCmdline([]byte(arg))
+
+	if !utf8.ValidString(got) {
+		t.Errorf("truncated cmdline is not valid UTF-8: %q", got)
+	}
+	runes := []rune(strings.TrimSuffix(got, "..."))
+	if len(runes) != cmdlineCap {
+		t.Errorf("kept %d characters, want %d", len(runes), cmdlineCap)
+	}
+	if !strings.HasSuffix(got, "...") {
+		t.Error("truncated cmdline should be marked with an ellipsis")
+	}
+}
+
+func TestParseCmdlineShortASCIIUnchanged(t *testing.T) {
+	if got := parseCmdline([]byte("/usr/bin/mysqld\x00--defaults-file=/etc/my.cnf\x00")); got !=
+		"/usr/bin/mysqld --defaults-file=/etc/my.cnf" {
+		t.Errorf("got %q", got)
+	}
+	if got := parseCmdline([]byte("\x00\x00")); got != "" {
+		t.Errorf("empty cmdline = %q, want empty", got)
 	}
 }

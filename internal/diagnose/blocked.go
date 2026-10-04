@@ -96,7 +96,14 @@ func (a *analysis) ruleBlockedThreads() *Finding {
 	// D state on its own is evidence, not proof: a driver may use
 	// uninterruptible sleep for a routine poll. Reporting the count is honest
 	// either way; what the severity says is how much it should worry someone.
-	ioStalling := a.cur.Pressure.IO.HasFull && a.cur.Pressure.IO.Full.Avg10 >= psiIOFullWarn
+	// The pressure this is weighed against has to be the same pressure the
+	// rest of the report quotes. On a container with per-cgroup PSI that is
+	// the cgroup's own file, not /proc/pressure/io: the system-wide number
+	// includes every other tenant on the host, so a noisy neighbour would
+	// push this finding up a severity while the blocked threads have nothing
+	// to do with it.
+	ioP := a.pressure().IO
+	ioStalling := ioP.HasFull && ioP.Full.Avg10 >= psiIOFullWarn
 	sev := SeverityInfo
 	switch {
 	case a.cur.Threads.Blocked > 0 && (ioStalling || storageThreads >= blockedThreadsWarn):
@@ -151,10 +158,12 @@ func (a *analysis) ruleBlockedThreads() *Finding {
 	}
 	if ioStalling {
 		evidence = append(evidence, Evidence{
-			Source: "/proc/pressure/io",
+			// The label must name the file the number actually came from,
+			// or the reader is sent to check a file that does not hold it.
+			Source: a.pressureSource("io"),
 			Detail: a.msg("full avg10=%.2f：与上面的被堵线程互相印证",
 				"full avg10=%.2f: corroborates the blocked threads above",
-				a.cur.Pressure.IO.Full.Avg10),
+				ioP.Full.Avg10),
 		})
 	}
 

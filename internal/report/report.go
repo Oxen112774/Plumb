@@ -223,9 +223,14 @@ func overviewLines(r diagnose.Report) []string {
 
 	// Only when /proc/stat was actually read: a machine that is running always
 	// accumulates jiffies, so a printed 0.0% would be a lie, not a reading.
+	//
+	// 繁忙 is user+system+irq+softirq and excludes the two after it. Putting
+	// all five side by side without that said out loud invites the reader to
+	// add them up and get a number over 100, then decide which one to
+	// believe — the report is supposed to remove that choice, not create it.
 	if r.CPUMeasured {
 		out = append(out, fmt.Sprintf(
-			"CPU      繁忙 %.1f%%   用户 %.1f%%   系统 %.1f%%   等磁盘 %.1f%%   被抢占 %.1f%%",
+			"CPU      繁忙 %.1f%%（用户 %.1f%% 系统 %.1f%%）｜不计入繁忙：等磁盘 %.1f%% 被抢占 %.1f%%",
 			r.CPUUsage.Busy, r.CPUUsage.User, r.CPUUsage.System,
 			r.CPUUsage.IOWait, r.CPUUsage.Steal))
 	}

@@ -40,7 +40,7 @@ import (
 // -ldflags "-X main.version=..." rather than keeping the same number correct in
 // two places. A binary that reports the wrong version is worse than one that
 // reports none: it is the first thing anyone checks when a fix does not land.
-var version = "1.0.0"
+var version = "1.0.1"
 
 // stdoutIsTerminal reports whether standard output is a console rather than a
 // pipe, a file or a CI log.
@@ -510,6 +510,11 @@ func setConfigKey(cfg *config.Config, key, val string) error {
 			return fmt.Errorf("%s 需要数字: %w", key, err)
 		}
 		if !cfg.Thresholds.Set(key, f) {
+			// A known key with an impossible value is a different mistake
+			// from a misspelled key, and the fix differs.
+			if _, known := cfg.Thresholds.Get(key); known {
+				return fmt.Errorf("阈值 %s 不能是负数: %s", key, val)
+			}
 			return fmt.Errorf("未知配置项 %q（可用: lang, color, style, terminal, "+
 				"interval, top, 以及 [thresholds] 段里的键名）", key)
 		}

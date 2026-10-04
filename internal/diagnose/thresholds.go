@@ -1,6 +1,7 @@
 package diagnose
 
 import (
+	"math"
 	"strings"
 )
 
@@ -133,7 +134,45 @@ func (t Thresholds) WithDefaults() Thresholds {
 	if t.CPUThrottleCritical <= 0 {
 		t.CPUThrottleCritical = d.CPUThrottleCritical
 	}
+	t.enforceOrder()
 	return t
+}
+
+// ordered lists the (lower, higher) field pairs that must stay in order.
+//
+// Each pair is a severity ladder: a rule escalates from the lower threshold
+// to the higher one. If the higher is set below the lower, the higher
+// severity becomes unreachable — the rule fires the lower one and can never
+// reach the next, and nothing in the report says the ceiling was removed. A
+// catastrophic number then reports as a mere warning, which is the worst way
+// for a threshold to be wrong: it still shows up, so nobody notices.
+//
+// Config files are hand-edited, so an inverted pair is a plausible typo
+// (swap two numbers, drop a digit). It is corrected here rather than
+// rejected: a config that is slightly odd should still produce a working
+// report, and the corrected value is visible in `plumb config`.
+func (t *Thresholds) enforceOrder() {
+	pairs := []struct {
+		lo, hi        *float64
+		loName, hiName string
+	}{
+		{&t.IOSomeWatch, &t.IOSomeWarn, "io_some_watch", "io_some_warn"},
+		{&t.IOFullWarn, &t.IOFullCritical, "io_full_warn", "io_full_critical"},
+		// No mem_some_watch -> mem_full_warn pair: those are different
+		// measures (some counts tasks waiting, full counts all tasks
+		// stalled) with different scales, so putting one above the other
+		// means nothing. The memory ladder is warn -> critical only.
+		{&t.MemFullWarn, &t.MemFullCritical, "mem_full_warn", "mem_full_critical"},
+		{&t.CPUSomeWatch, &t.CPUSomeWarn, "cpu_some_watch", "cpu_some_warn"},
+		{&t.CgroupMemWatch, &t.CgroupMemWarn, "cgroup_mem_watch", "cgroup_mem_warn"},
+		{&t.CPUThrottleWatch, &t.CPUThrottleWarn, "cpu_throttle_watch", "cpu_throttle_warn"},
+		{&t.CPUThrottleWarn, &t.CPUThrottleCritical, "cpu_throttle_warn", "cpu_throttle_critical"},
+	}
+	for _, p := range pairs {
+		if *p.hi < *p.lo {
+			*p.hi = *p.lo
+		}
+	}
 }
 
 // Names returns every field's config key, in the order plumb config prints
@@ -185,7 +224,16 @@ func (t Thresholds) Get(name string) (float64, bool) {
 }
 
 // Set writes a field by config key, reporting false for an unknown name.
+//
+// A negative or non-finite value is rejected rather than stored. Every field
+// goes through WithDefaults, which replaces anything <= 0 with the built-in
+// default — so accepting -5 would print "已设置" and then judge against 2.0 on
+// the next run. That is the specific failure this project promises not to
+// ship: a setting that looks like it took effect and did not.
 func (t *Thresholds) Set(name string, v float64) bool {
+	if v < 0 || math.IsNaN(v) || math.IsInf(v, 0) {
+		return false
+	}
 	switch name {
 	case "io_full_warn":
 		t.IOFullWarn = v

@@ -35,8 +35,28 @@ func (c CPUTimes) Total() uint64 {
 	return c.User + c.Nice + c.System + c.Idle + c.IOWait + c.IRQ + c.SoftIRQ + c.Steal
 }
 
-// Busy is total time not spent idle.
-func (c CPUTimes) Busy() uint64 { return c.Total() - c.Idle }
+// Busy is the share of the window the CPUs spent actually executing
+// instructions — user, nice, system, irq and softirq.
+//
+// It deliberately excludes IOWait and Steal, matching what top(1) prints as
+// "used" (its %Cpu(s) line is 100-idle and does not include wa or st).
+// Counting those two as busy makes a storage-stalled machine or a
+// oversubscribed VM report "CPU 90%" while the real instruction count is
+// 20% — and the steal case produces a report that contradicts itself, saying
+// both "the hypervisor took 60%" and "CPU is 90% busy". IOWait and Steal are
+// reported as their own fields precisely because they are different problems
+// with different fixes; folding them into Busy throws that away.
+func (c CPUTimes) Busy() uint64 {
+	// Guard before subtracting, not after: these are uint64, so an
+	// intermediate result below zero wraps to ~1.8e19 rather than going
+	// negative, and a clamp written as "if b < 0" would never fire.
+	// Idle+IOWait+Steal can exceed Total only on a short window across a
+	// counter discontinuity, but then the number is meaningless anyway.
+	if c.Idle+c.IOWait+c.Steal >= c.Total() {
+		return 0
+	}
+	return c.Total() - c.Idle - c.IOWait - c.Steal
+}
 
 // Delta subtracts an earlier sample, clamping at zero. A field can legitimately
 // go backwards when a CPU is offlined, and a counter can wrap; neither should

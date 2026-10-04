@@ -250,6 +250,32 @@ var areaLeaves = []Leaf{
 		Confidence: Certain,
 	},
 	{
+		Key:   "CPU 配额",
+		Kind:  KindArea,
+		Alias: []string{"cgroup", "限额", "quota", "限流", "throttle", "throttling", "cpu.max", "cpu.stat", "nr_throttled", "cfs", "带宽控制"},
+		// The catalogue line is capped at 38 runes, so the first clause has
+		// to carry the whole idea on its own.
+		What:  "CPU 时间被 cgroup 配额掐掉了：不是跑得慢，是被内核按周期停。",
+		Why: []string{
+			"plumb 读 /sys/fs/cgroup/cpu.max 与 cpu.stat：那是这个 cgroup 自己的账。cpu.max 写着“每 100ms 最多给你多少 µs”，剩下的时间任务处于不可运行状态",
+			"被限流的时间不进 PSI 的 cpu some，也不进 load average —— 这是唯一一种“CPU 那一节看着干净、服务却很慢”的成因。别的指标都正常而服务变慢，先看配额",
+			"限流是按周期算的，不是按秒平均：某一周期想突发就用光配额，剩下的周期只能等。所以均值看着不高，也照样在被掐",
+		},
+		Fix: []string{
+			"先看被掐的比例：报告里的 throttled 是本采样窗口内的数，不是开机以来的累计 —— 累计值会稀释掉一次正在发生的限流",
+			"是业务量涨了就调大 cpu.max；是程序自己太并发就改并发方式 —— 加大配额只是让它更快地用完",
+			"确认是限流而不是机器真忙：机器真忙时 load 和 PSI 会跟着涨，配额掐停时它们不涨",
+		},
+		Unknown: "plumb 只知道这个 cgroup 被掐了多少时间，看不到配额是谁设的、为什么设成这个数，也看不到同机其他容器的配额。它能确认“被掐了”，不能替你判断“该不该给这么多”。",
+		Sources: []string{
+			"内核文档 Documentation/scheduler/sched-bwc.rst（CFS 带宽控制）",
+			"内核文档 Documentation/admin-guide/cgroup-v2.rst（cpu.max、cpu.stat）",
+			"内核源码 kernel/sched/fair.c（cfs_bandwidth、throttle_cfs_bandwidth）",
+			"内核源码 kernel/sched/core.c（throttled_time 累加）",
+		},
+		Confidence: Certain,
+	},
+	{
 		Key:   "整体",
 		Kind:  KindArea,
 		Alias: []string{"总结", "概览", "summary"},

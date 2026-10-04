@@ -144,6 +144,10 @@ var scripts = map[string]script{
 		situation: "网络在丢包重传，或把连接挡在门外 —— 慢的可能不是这台机器。",
 		first:     "accept 队列在丢连接就是应用收不过来，先看 ss -lnt；只是重传高，就查链路和网卡，别改这台机器的参数。",
 	},
+	"CPU 配额": {
+		situation: "CPU 时间被 cgroup 配额掐掉了 —— 任务不是跑得慢，是被内核按周期强行停下。",
+		first:     "这解释了为什么 CPU 看着不忙、服务却很慢：被限流的时间不算进 CPU 使用率。先看被掐的比例，再决定是调大配额还是改并发。",
+	},
 	"内存配额": {
 		situation: "cgroup 内存配额快满了 —— 到顶不是变慢，是 OOM kill。",
 		first:     "先看是谁在涨。配额到顶内核直接杀进程，不会商量：先调限额或堵泄漏。",
@@ -198,6 +202,10 @@ var scriptsEN = map[string]script{
 	"memory quota": {
 		situation: "The cgroup memory quota is nearly full — hitting it is not slowness, it is an OOM kill.",
 		first:     "Find what is growing first. At the limit the kernel kills a process without negotiating: raise the limit or plug the leak.",
+	},
+	"CPU quota": {
+		situation: "CPU time is being cut off by the cgroup quota — the task is not running slowly, it is being stopped by the kernel every period.",
+		first:     "This is why CPU looks idle while the service is slow: throttled time does not count toward CPU usage. Check the throttled share first, then decide between a bigger quota and less concurrency.",
 	},
 }
 

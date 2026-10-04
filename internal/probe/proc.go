@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"unicode/utf8"
 )
 
 // Process is one task's cumulative counters, from /proc/<pid>.
@@ -53,6 +54,7 @@ func (p Process) CPUTicks() uint64 { return p.UTime + p.STime }
 // IOBytes is total bytes this process moved to and from storage.
 func (p Process) IOBytes() uint64 { return p.ReadBytes + p.WriteBytes }
 
+// cmdlineCap is a character count, not a byte count — see parseCmdline.
 const cmdlineCap = 160
 
 // ListPIDs enumerates the numeric entries in /proc.
@@ -108,8 +110,17 @@ func readProcess(r Root, pid int) (Process, error) {
 		return Process{}, err
 	}
 
+	// UID starts at -1, not 0. A zero-valued Process has UID 0, and 0 is a
+	// real uid — root's. So if /proc/<pid>/status cannot be read (the process
+	// is exiting mid-scan, /proc is mounted hidepid, or the pid is a kernel
+	// thread hidden by the container's namespace) the zero value silently
+	// labels an ordinary user's process as root-owned. That is the field
+	// that points at who to investigate, so it must distinguish "read 0"
+	// from "did not read". parseStatusUID already returns -1 for that case;
+	// this is where that value has to be carried in.
 	p := Process{
 		PID:          pid,
+		UID:          -1,
 		Name:         st.Name,
 		UTime:        st.UTime,
 		STime:        st.STime,
@@ -307,8 +318,13 @@ func parseCmdline(data []byte) string {
 	}
 	s = strings.ReplaceAll(s, "\x00", " ")
 	s = strings.Join(strings.Fields(s), " ")
-	if len(s) > cmdlineCap {
-		s = s[:cmdlineCap] + "..."
+	// Cap in runes, not bytes. Slicing at a byte offset can land in the
+	// middle of a multi-byte character; the result is invalid UTF-8, which
+	// json.Marshal replaces with U+FFFD and the terminal prints as garbage.
+	// A Chinese command line is not an exotic case on a Chinese-locale host.
+	if n := utf8.RuneCountInString(s); n > cmdlineCap {
+		r := []rune(s)
+		s = string(r[:cmdlineCap]) + "..."
 	}
 	return s
 }

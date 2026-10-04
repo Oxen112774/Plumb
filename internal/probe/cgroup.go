@@ -136,10 +136,30 @@ func (c Cgroup) MemoryUsedPercent() float64 {
 func ReadCgroup(r Root) (Cgroup, error) {
 	var c Cgroup
 
-	data, err := r.ReadFile("sys/fs/cgroup/cpu.max")
+	// Every file below lives at the *relative* path of this process's own
+	// cgroup, not at the root of the hierarchy. Reading the root instead is
+	// a silent failure that looks like success: the root of a unified
+	// hierarchy is always "max 100000", so V2 comes back true, the quota
+	// comes back unset, and ruleCPUThrottle then skips on a nil quota — the
+	// headline K8s feature quietly off, with nothing in the report to say so.
+	base := cgroupV2Base(r)
+
+	data, err := r.ReadFile(base + "cpu.max")
 	if err != nil {
-		// No unified hierarchy mounted (or v1): nothing to report, and the
-		// caller falls back to the host-wide numbers.
+		// No unified hierarchy mounted. Distinguish "this is a cgroup v1
+		// host" from "this host has no cgroup at all", because they need
+		// different things from the reader: v1 means every container limit
+		// on this machine went unread, and staying quiet about that would
+		// leave a plumb report on a RHEL 7 box looking complete while
+		// silently skipping the entire cgroup section.
+		if v1 := hasCgroupV1(r); v1 != "" {
+			return Cgroup{}, fmt.Errorf(
+				"cgroup v1 only (%s): container limits are not read — "+
+					"this tool reads cgroup v2 (kernel 4.5+ with unified hierarchy)", v1)
+		}
+		// No cgroup hierarchy at all: bare metal without a limit, or a
+		// namespace that hides it. Not an error — every consumer falls
+		// back to the host-wide numbers.
 		return Cgroup{}, nil
 	}
 	c.V2 = true
@@ -157,7 +177,7 @@ func ReadCgroup(r Root) (Cgroup, error) {
 		c.CPUQuotaCores = quota / period
 	}
 
-	if data, err := r.ReadFile("sys/fs/cgroup/memory.max"); err == nil {
+	if data, err := r.ReadFile(base + "memory.max"); err == nil {
 		v := strings.TrimSpace(string(data))
 		if v != "max" {
 			if bytes, err := atou(v); err != nil {
@@ -167,7 +187,7 @@ func ReadCgroup(r Root) (Cgroup, error) {
 			}
 		}
 	}
-	if data, err := r.ReadFile("sys/fs/cgroup/memory.current"); err == nil {
+	if data, err := r.ReadFile(base + "memory.current"); err == nil {
 		if bytes, err := atou(strings.TrimSpace(string(data))); err == nil {
 			c.MemoryCurrentKB = bytes / 1024
 		}
@@ -176,9 +196,9 @@ func ReadCgroup(r Root) (Cgroup, error) {
 	// while memory.events.local counts only this one. The local file is
 	// preferred: on a pod cgroup with children, the hierarchical total would
 	// blame this workload for allocations it did not make.
-	eventsPath := "sys/fs/cgroup/memory.events"
-	if r.Exists("sys/fs/cgroup/memory.events.local") {
-		eventsPath = "sys/fs/cgroup/memory.events.local"
+	eventsPath := base + "memory.events"
+	if r.Exists(base + "memory.events.local") {
+		eventsPath = base + "memory.events.local"
 		c.EventsLocal = true
 	}
 	if data, err := r.ReadFile(eventsPath); err == nil {
@@ -192,13 +212,71 @@ func ReadCgroup(r Root) (Cgroup, error) {
 	}
 
 	var err2 error
-	c.Throttle, err2 = readCPUStat(r)
+	c.Throttle, err2 = readCPUStat(r, base)
 	if err2 != nil {
 		return c, err2
 	}
 
-	c.Pressure = readCgroupPressure(r)
+	c.Pressure = readCgroupPressure(r, base)
 	return c, nil
+}
+
+// hasCgroupV1 reports whether this host uses the legacy split hierarchies,
+// naming the first controller mount it finds. It exists so ReadCgroup can say
+// "your limits are in v1 files and this tool reads v2" instead of returning
+// an empty Cgroup that reads as "no limit set".
+func hasCgroupV1(r Root) string {
+	// The v1 layout mounts one hierarchy per controller, each with its own
+	// top-level directory under /sys/fs/cgroup.
+	for _, c := range []string{"cpu", "memory", "pids", "cpuacct", "blkio", "cpuset"} {
+		if r.Exists("sys/fs/cgroup/" + c) {
+			return c
+		}
+	}
+	return ""
+}
+
+// cgroupV2Base returns the /proc-relative directory holding this process's
+// own cgroup v2 files, always ending in a slash so callers can concatenate a
+// filename onto it.
+//
+// /proc/self/cgroup lists one "hierarchy:controllers:path" line per hierarchy;
+// on a unified (v2) host the line with empty controllers is the one to use.
+// Its path is relative to the cgroup mount, so joining it onto
+// sys/fs/cgroup is what locates this process's own limits.
+//
+// If the file is missing or has no v2 line, the root of the hierarchy is
+// returned. That is the best guess available and it is correct on a host
+// where the tool runs in the root cgroup; the alternative would be to return
+// nothing at all and silently report "no cgroup" on every system where the
+// file cannot be read.
+func cgroupV2Base(r Root) string {
+	const mount = "sys/fs/cgroup/"
+	base := mount
+	data, err := r.ReadFile("proc/self/cgroup")
+	if err != nil {
+		return mount
+	}
+	_ = lines(data, func(line string) error {
+		// Format: "0::/path" for v2, "2:cpu,cpuacct:/path" for v1.
+		hierarchy, rest, ok := strings.Cut(line, ":")
+		if !ok || hierarchy != "0" {
+			return nil
+		}
+		_, path, ok := strings.Cut(rest, ":")
+		if !ok || path == "" || path == "/" {
+			return nil
+		}
+		// Reject anything that could climb out of the mount. The kernel
+		// does not emit such paths, but this string is used to build a
+		// filename, and -root lets tests point at an arbitrary tree.
+		if strings.Contains(path, "..") {
+			return nil
+		}
+		base = mount + strings.TrimPrefix(path, "/") + "/"
+		return errStop
+	})
+	return base
 }
 
 // readCPUStat reads the CFS bandwidth counters from cpu.stat.
@@ -207,8 +285,8 @@ func ReadCgroup(r Root) (Cgroup, error) {
 // without them reads as Known=false rather than as "throttled 0 times" — the
 // difference between a ceiling that was never hit and one that was never
 // installed.
-func readCPUStat(r Root) (CPUThrottle, error) {
-	data, err := r.ReadFile("sys/fs/cgroup/cpu.stat")
+func readCPUStat(r Root, base string) (CPUThrottle, error) {
+	data, err := r.ReadFile(base + "cpu.stat")
 	if err != nil {
 		return CPUThrottle{}, nil
 	}
@@ -259,11 +337,11 @@ func parseKeyValueLines(data []byte, want ...string) (map[string]uint64, error) 
 // limits rather than under /proc. Missing files leave the zero value with
 // Supported false — per-cgroup PSI needs the same kernel options as the
 // system-wide one, plus a kernel new enough to expose it per cgroup.
-func readCgroupPressure(r Root) Pressure {
+func readCgroupPressure(r Root, base string) Pressure {
 	var p Pressure
-	p.CPU, _ = readPSIAt(r, "sys/fs/cgroup/cpu.pressure")
-	p.IO, _ = readPSIAt(r, "sys/fs/cgroup/io.pressure")
-	p.Memory, _ = readPSIAt(r, "sys/fs/cgroup/memory.pressure")
+	p.CPU, _ = readPSIAt(r, base+"cpu.pressure")
+	p.IO, _ = readPSIAt(r, base+"io.pressure")
+	p.Memory, _ = readPSIAt(r, base+"memory.pressure")
 	p.Supported = p.CPU.HasSome || p.IO.HasFull || p.Memory.HasFull
 	return p
 }

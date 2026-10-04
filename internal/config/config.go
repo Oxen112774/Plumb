@@ -203,6 +203,13 @@ func (c *Config) set(section, key, val string) error {
 			return fmt.Errorf("%s: %w", key, err)
 		}
 		if !c.Thresholds.Set(key, f) {
+			// Set rejects a known key holding a nonsensical value as firmly
+			// as it rejects an unknown name, and "unknown key" is the wrong
+			// thing to say about a typo'd number — it sends the reader
+			// looking for a spelling problem they do not have.
+			if _, known := c.Thresholds.Get(key); known {
+				return fmt.Errorf("[thresholds] %s: must be a non-negative number, got %s", key, val)
+			}
 			return fmt.Errorf("unknown [thresholds] key %q", key)
 		}
 		return nil

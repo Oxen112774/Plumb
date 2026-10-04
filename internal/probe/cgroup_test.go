@@ -3,6 +3,7 @@ package probe
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -248,5 +249,100 @@ func TestEffectiveCoresRoundsQuotaUpAndNeverExceedsHost(t *testing.T) {
 					tc.host, tc.quota, got, tc.want)
 			}
 		})
+	}
+}
+
+// The files that carry a container's limits live at the relative path of the
+// process's own cgroup, not at the root of the hierarchy. Reading the root is
+// a silent failure dressed as success: the root is always "max 100000", so
+// V2 comes back true and the quota comes back unset, and the throttling rules
+// then skip on a nil quota with nothing in the report to explain why.
+func TestReadCgroupUsesTheProcessOwnCgroupPath(t *testing.T) {
+	const rel = "kubepods.slice/kubepods-burstable.slice/kubepods-burstable-pod5c1e.2c3d/" +
+		"cri-containerd-deadbeef.scope"
+
+	files := cgroupFiles()
+	// Move the whole envelope under the pod's own cgroup directory, and give
+	// the hierarchy root the unlimited values it would really have.
+	//
+	// The copy is collected first and applied second: mutating a map while
+	// ranging over it is not a way to move keys, and the iteration order is
+	// randomised, so the new entries would sometimes be overwritten by the
+	// "max 100000" line on a later pass.
+	moved := map[string]string{}
+	for key, content := range cgroupFiles() {
+		// The trailing slash matters: cgroupV2Base ends its path with one,
+		// and concatenating without it produces "...scopecpu.max".
+		moved["sys/fs/cgroup/"+rel+"/"+strings.TrimPrefix(key, "sys/fs/cgroup/")] = content
+	}
+	for key := range files {
+		// The root's own files carry no limits: a quota line reads
+		// "max 100000", and a "key value" file needs its keys to be
+		// numbers or the reader rejects it outright.
+		if strings.HasSuffix(key, ".pressure") || strings.HasSuffix(key, ".events") ||
+			strings.HasSuffix(key, ".stat") {
+			files[key] = "usage_usec 0\nnr_periods 0\nnr_throttled 0\nthrottled_usec 0\n" +
+				"low 0\nhigh 0\nmax 0\noom 0\noom_kill 0\n" +
+				"some avg10=0.00 avg60=0.00 avg300=0.00 total=0\n" +
+				"full avg10=0.00 avg60=0.00 avg300=0.00 total=0\n"
+			continue
+		}
+		files[key] = "max 100000\n"
+	}
+	for key, content := range moved {
+		files[key] = content
+	}
+	files["proc/self/cgroup"] = "0::/" + rel + "\n"
+
+	c, err := ReadCgroup(fixture(t, files))
+	if err != nil {
+		t.Fatalf("ReadCgroup: %v", err)
+	}
+	if c.CPUQuotaCores != 1.5 {
+		t.Errorf("CPUQuotaCores = %v, want 1.5 — read the hierarchy root, not this cgroup", c.CPUQuotaCores)
+	}
+	if c.MemoryMaxKB != 8388608 {
+		t.Errorf("MemoryMaxKB = %d, want 8388608", c.MemoryMaxKB)
+	}
+	if c.OOMKills != 1 {
+		t.Errorf("OOMKills = %d, want 1", c.OOMKills)
+	}
+	if !c.Throttle.Known || c.Throttle.Throttled != 300 {
+		t.Errorf("throttle = %+v, want nr_throttled 300 known", c.Throttle)
+	}
+}
+
+// A v1-only host has no "0::" line. The base must fall back to the mount root
+// so the rest of the reader behaves exactly as it did before.
+func TestCgroupV2BaseFallsBackToMountRoot(t *testing.T) {
+	cases := []struct {
+		name string
+		self string
+		want string
+	}{
+		{"no file", "", "sys/fs/cgroup/"},
+		{"v1 only", "12:pids:/system.slice\n11:memory:/system.slice\n", "sys/fs/cgroup/"},
+		{"v2 at root", "0::/\n", "sys/fs/cgroup/"},
+		{"v2 in a slice", "0::/system.slice/sshd.service\n", "sys/fs/cgroup/system.slice/sshd.service/"},
+		{"v2 alongside v1", "5:cpu,cpuacct:/system.slice\n0::/kubepods/podabc\n", "sys/fs/cgroup/kubepods/podabc/"},
+	}
+	for _, c := range cases {
+		files := map[string]string{}
+		if c.self != "" {
+			files["proc/self/cgroup"] = c.self
+		}
+		if got := cgroupV2Base(fixture(t, files)); got != c.want {
+			t.Errorf("%s: base = %q, want %q", c.name, got, c.want)
+		}
+	}
+}
+
+// The relative path is concatenated onto a mount point to build a filename,
+// and -root lets a test point at any tree. A path that climbs out of the
+// mount must not be honoured even though the kernel never emits one.
+func TestCgroupV2BaseRejectsParentTraversal(t *testing.T) {
+	files := map[string]string{"proc/self/cgroup": "0::/../../../etc\n"}
+	if got := cgroupV2Base(fixture(t, files)); got != "sys/fs/cgroup/" {
+		t.Errorf("base = %q, want the mount root for a traversing path", got)
 	}
 }
