@@ -1,0 +1,93 @@
+name: 报告问题
+description: plumb 判错了、读不到、或者崩溃了 —— 都在这里报
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        先看一眼已知局限，可能已经写在里面了：
+        https://github.com/Oxen112774/plumb#已知局限
+
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: 发生了什么
+      description: 看到的输出，或期望看到却没看到的。
+      placeholder: |
+        plumb 说 CPU 繁忙 30%，但 top 显示 95%
+    validations:
+      required: true
+
+  - type: textarea
+    id: full-output
+    attributes:
+      label: 完整输出
+      description: |
+        出问题那一次的完整 plumb 输出，不要截图 —— 截图里的字选不中。
+        最好用 -json，它保留结构：
+        `plumb -json > out.json`
+      render: text
+    validations:
+      required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: plumb 版本
+      description: `plumb -version` 的输出
+      placeholder: "plumb 1.0.2"
+    validations:
+      required: true
+
+  - type: input
+    id: kernel
+    attributes:
+      label: 内核版本
+      description: `uname -a` 的输出
+      placeholder: "Linux 5.15.0-91-generic ..."
+    validations:
+      required: true
+
+  - type: dropdown
+    id: env
+    attributes:
+      label: 运行在哪
+      options:
+        - 裸机 / 虚拟机
+        - Docker
+        - Kubernetes
+        - 其他容器运行时
+    validations:
+      required: true
+
+  - type: dropdown
+    id: cgroup
+    attributes:
+      label: cgroup 版本
+      description: v2 才有 per-cgroup PSI 和限额
+      options:
+        - v2
+        - v1
+        - 不确定
+    validations:
+      required: true
+
+  - type: textarea
+    id: expectation
+    attributes:
+      label: 你觉得应该是什么
+      description: |
+        误判比漏报严重，所以这条最有用。
+        如果你判断某条判定指错了人，说清你觉得对的是什么 —— 报告里每条判定都标了出处（哪个文件、哪个字段），可以直接对照着看它凭什么这么说。
+    validations:
+      required: false
+
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: 补充确认
+      options:
+        - label: 我确认过这是最新版本
+          required: false
+        - label: 我读过「已知局限」，里面没有覆盖我的情况
+          required: false

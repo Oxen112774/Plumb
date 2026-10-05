@@ -1,0 +1,52 @@
+name: 功能建议
+description: 觉得 plumb 该查但没查的东西
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        先看 [ROADMAP](https://github.com/Oxen112774/plumb/blob/main/ROADMAP.md) ——
+        想要的东西可能已经在里面了，那条路已经有人想过。
+
+        边界是明确的：不装 agent、不常驻、不在服务端存状态、只读 /proc 和
+        /sys/fs/cgroup。任何需要写入系统或启动外部进程的建议都不会被采纳。
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: 你想解决什么问题
+      description: |
+        从问题出发，不要从功能出发。
+        「我想让 plumb 查 X」不如「我在 Y 场景下看不出来 Z」。
+      placeholder: |
+        线上机器负载高，但我分不清是网络抖动还是磁盘抖动，
+        只能上去手工 cat /proc/pressure/*
+    validations:
+      required: true
+
+  - type: textarea
+    id: how-now
+    attributes:
+      label: 你现在怎么解决
+      description: 现在用的什么工具或什么手工步骤。如果手工步骤里有某一步很难写出来，说清为什么。
+    validations:
+      required: true
+
+  - type: textarea
+    id: data-source
+    attributes:
+      label: 数据从哪来
+      description: |
+        可选。如果你知道该信息能从哪个内核接口拿到（某个 /proc 文件、
+        某个 syscall、某个 tracepoint），写下来 —— 这会显著提高它被实现的可能。
+      placeholder: /sys/fs/cgroup/memory.events.local，或 bpftrace 的某个 tracepoint
+    validations:
+      required: false
+
+  - type: checkboxes
+    id: constraints
+    attributes:
+      label: 边界确认
+      options:
+        - label: 我读过上面的边界，这个建议不需要装 agent 或写入系统
+          required: true

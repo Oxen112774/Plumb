@@ -357,7 +357,7 @@ func Analyze(prev, cur probe.Snapshot, opts Options) Report {
 	a.throttle = computeThrottleRate(prev.Cgroup.Throttle, cur.Cgroup.Throttle, a.hasPrev)
 
 	rep := Report{
-		StartedAt:    cur.At,
+		StartedAt: cur.At,
 		// The measured gap, not the requested one — this string is printed
 		// as the sample window, so showing the nominal value there would
 		// contradict every rate computed from the real one.

@@ -153,7 +153,7 @@ func (t Thresholds) WithDefaults() Thresholds {
 // report, and the corrected value is visible in `plumb config`.
 func (t *Thresholds) enforceOrder() {
 	pairs := []struct {
-		lo, hi        *float64
+		lo, hi         *float64
 		loName, hiName string
 	}{
 		{&t.IOSomeWatch, &t.IOSomeWarn, "io_some_watch", "io_some_warn"},

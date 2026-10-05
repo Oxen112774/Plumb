@@ -5,7 +5,6 @@ import (
 	"testing"
 )
 
-
 // An inverted severity ladder makes the higher level unreachable, so a
 // catastrophic number reports as a mere warning. It still appears, which is
 // exactly why nobody would notice.

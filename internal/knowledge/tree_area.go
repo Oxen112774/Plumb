@@ -255,7 +255,7 @@ var areaLeaves = []Leaf{
 		Alias: []string{"cgroup", "限额", "quota", "限流", "throttle", "throttling", "cpu.max", "cpu.stat", "nr_throttled", "cfs", "带宽控制"},
 		// The catalogue line is capped at 38 runes, so the first clause has
 		// to carry the whole idea on its own.
-		What:  "CPU 时间被 cgroup 配额掐掉了：不是跑得慢，是被内核按周期停。",
+		What: "CPU 时间被 cgroup 配额掐掉了：不是跑得慢，是被内核按周期停。",
 		Why: []string{
 			"plumb 读 /sys/fs/cgroup/cpu.max 与 cpu.stat：那是这个 cgroup 自己的账。cpu.max 写着“每 100ms 最多给你多少 µs”，剩下的时间任务处于不可运行状态",
 			"被限流的时间不进 PSI 的 cpu some，也不进 load average —— 这是唯一一种“CPU 那一节看着干净、服务却很慢”的成因。别的指标都正常而服务变慢，先看配额",
