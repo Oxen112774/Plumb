@@ -1,16 +1,17 @@
 @echo off
 REM ===================================================================
-REM  plumb · 上传到 GitHub
+REM  plumb · 推送到 GitHub
 REM ===================================================================
-REM  这个脚本会做三件事：
-REM    1. 如果远端只有 GitHub 自动生成的 .gitignore，先删掉它
-REM       （两个历史没有共同祖先，带着它推会被拒；而且它不如本地那份全）
-REM    2. 推 main 分支
-REM    3. 推送成功后打一个 v1.0.2 标签
+REM  用法：双击本文件。不需要打开 Git Bash。
 REM
-REM  用法：双击本文件。凭据框里用户名填 Oxen112774，密码填 GitHub 的
-REM  Personal Access Token（不是登录密码）。
-REM  Token 在 https://github.com/settings/tokens/new 生成，勾 repo 权限。
+REM  会做两件事：
+REM    1. 推 main 分支（用 --force-with-lease，覆盖掉建仓时 GitHub 自动生成
+REM       的那个 .gitignore 提交 —— 两个历史没有共同祖先，普通 push 必被拒）
+REM    2. 推送成功后打一个 v1.0.2 标签
+REM
+REM  凭据框里：用户名填 Oxen112774，密码填 GitHub 的 Personal Access
+REM  Token（不是登录密码）。Token 在 https://github.com/settings/tokens/new
+REM  生成，勾 repo 权限。
 REM  停止：窗口里按 Ctrl+C
 REM ===================================================================
 
@@ -32,46 +33,43 @@ if errorlevel 1 (
   exit /b 1
 )
 
-echo  本地提交：
+echo  本地最近 5 个提交：
 git log --oneline -5
 echo.
 
 set GIT_TERMINAL_PROMPT=0
 set GITCRED=git -c credential.helper= -c credential.helper=wincred
 
-REM --- 第一步：远端只有 GitHub 自动生成的 .gitignore 时先清掉 -------------
-REM 远端那个文件是建仓时选 Go 模板生成的。它有两个问题：一是两个历史没有
-REM 共同祖先，带着它推会被拒（fetch first）；二是它的覆盖面不如本地那份
-REM （缺 /.gocache/、/media/ 这些真正占地方的），推上去会覆盖掉。
-REM 判断方式是远端内容只有一个 .gitignore，且本地已有自己的版本。
-echo  正在检查远端状态...
-%GITCRED% ls-remote --exit-code -h origin >nul 2>&1
-set REMOTE_EXISTS=!errorlevel!
+REM --- 第一步：看远端现在有什么 -------------------------------------------
+REM 建仓时勾了 Go 模板，GitHub 自己生成并提交了一个 .gitignore。那个 commit
+REM 和本地 14 个提交没有共同祖先，是两条独立的根，所以普通 push 一定被拒：
+REM     ! [rejected]  main -> main (fetch first)
+REM     ! [rejected]  main -> main (non-fast-forward)
+REM
+REM 试过并确认走不通的路（别再试）：
+REM   git rm origin/main:.gitignore   -> 远端是裸库，pathspec 不匹配
+REM   git push origin :.gitignore      -> 裸库不支持这个 ref 删除语法
+REM   checkout origin/main -> rm -> 切回本地 SHA
+REM                                    -> 分支指针退回独立根，仍被拒
+REM   --allow-unrelated-histories     -> 能过，但平白多一个 merge commit
+REM
+REM 唯一既干净又可靠的办法：--force-with-lease 覆盖掉那个模板提交。
+REM 远端只有 GitHub 自己生成的一个 .gitignore，没有有价值的内容需要保留。
+REM --force-with-lease 会在远端被别人改过时主动拒绝，而不是闷头覆盖。
+echo正在检查远端状态...
+%GITCRED% fetch origin main >nul 2>&1
+for /f "%%c in ('git ls-tree --name-only -r origin/main 2^>nul ^| find /c /') do set FILECOUNT=%%c
+if not defined FILECOUNT set FILECOUNT=0
 
-if not "!REMOTE_EXISTS!"=="0" (
+if "!FILECOUNT!"=="1" (
   echo.
-  echo  远端是空的，直接推即可。跳过清理。
+  echo  远端只有 1 个文件 —— 建仓时 GitHub 自动生成的 .gitignore。
+  echo  本地那份覆盖更全，而且它挡住了第一次推送，将被整体替换掉。
 ) else (
-  %GITCRED% fetch origin main >nul 2>&1
-  for /f "%%c in ('git ls-tree --name-only -r origin/main 2^>nul ^| find /c /') do set FILECOUNT=%%c
-  if not defined FILECOUNT set FILECOUNT=0
-
-  if "!FILECOUNT!"=="1" (
-    echo.
-    echo  远端只有一个文件 —— 应该是建仓时 GitHub 生成的 .gitignore。
-    echo  它会让第一次推送被拒（两个历史无共同祖先），而且覆盖面不如本地那份。
-    echo  正在删除远端这个文件...
-    %GITCRED% rm origin/main:.gitignore >nul 2>&1
-    if errorlevel 1 (
-      echo  [!] 删除失败。如果这一步报错，改为手动处理：
-      echo      打开 https://github.com/Oxen112774/Plumb
-      echo      点 .gitignore → 右上角垃圾桶 → 底部直接提交
-      echo      然后再双击本文件。
-    ) else (
-      echo  已删除。继续。
-    )
+  if "!FILECOUNT!"=="0" (
+    echo  远端是空的，直接推即可。
   ) else (
-    echo  远端已有 !FILECOUNT! 个文件，看起来已经推过了，直接推送。
+    echo  远端已有 !FILECOUNT! 个文件，应该已经推过了。
   )
 )
 
@@ -81,21 +79,24 @@ echo    用户名： Oxen112774
 echo    密码：   GitHub 的 Personal Access Token
 echo.
 
-%GITCRED% push -u origin main
+%GITCRED% push --force-with-lease -u origin main
 set RC=%ERRORLEVEL%
 
 if not "%RC%"=="0" goto FAILED
 
 REM --- 打标签：版本号与二进制一致，别人 clone 下来能直接用 -----------------
-for /f "tokens=2" %%v in ('git describe --tags --abbrev=0 2^>nul') do set LASTTAG=%%v
-if not defined LASTTAG set LASTTAG=none
 echo.
-echo  当前最后一个标签：!LASTTAG!
-%GITCRED% tag -a v1.0.2 -m "内核栈归因、PSI、cgroup/K8s，以及一棵 102 叶的知识树" 2>nul
+echo  正在打 v1.0.2 标签...
+%GITCRED% rev-parse v1.0.2 >nul 2>&1
 if errorlevel 1 (
-  echo  （标签已存在，跳过）
+  %GITCRED% tag -a v1.0.2 -m "内核栈归因、PSI、cgroup/K8s，以及一棵 102 叶的知识树" >nul 2>&1
 )
 %GITCRED% push origin v1.0.2 >nul 2>&1
+if errorlevel 1 (
+  echo  （标签已存在或无需更新，跳过）
+) else (
+  echo  标签已推送。
+)
 
 echo.
 echo  ----------------------
@@ -103,9 +104,14 @@ echo  推送成功。
 echo.
 echo  仓库地址：https://github.com/Oxen112774/Plumb
 echo.
+echo  正在核对远端...
+%GITCRED% fetch origin main >nul 2>&1
+for /f "%%c in ('git ls-tree --name-only -r origin/main 2^>nul ^| find /c /') do set FILECOUNT=%%c
+echo  远端文件数：!FILECOUNT!
+echo.
 echo  接下来值得做的一件事：
 echo    去 Settings → About 写一句话简介，点右上角 Edit 就能改。
-echo    现在那里是空的。
+echo    现在那里是空的，不写的话搜不到。
 goto END
 
 :FAILED
@@ -122,12 +128,11 @@ echo     勾 repo 权限，生成后复制那串 ghp_... （只显示一次）�
 echo     用户名填 Oxen112774，密码框粘贴 Token。
 echo.
 echo  2. 没弹凭据框
-echo     手动跑一次并把 Token 粘进去：
-echo       git -c credential.helper= push -u origin main
+echo     在 Git Bash 里手打这一行（手打，不要粘贴）：
+echo       git -c credential.helper= push --force-with-lease -u origin main
 echo.
-echo  3. 报 fetch first / non-fast-forward
-echo     远端还有东西没清掉。回上面的第 1 步手动删掉 GitHub 生成的
-echo     .gitignore，再推一次。
+echo  3. 报 stale info
+echo     远端在你上次 fetch 之后又被改过。双击本文件重新跑一次即可。
 echo.
 echo  无论哪种，修好之后再双击本文件就行。
 
