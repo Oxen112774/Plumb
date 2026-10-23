@@ -40,6 +40,37 @@ echo.
 set GIT_TERMINAL_PROMPT=0
 set GITCRED=git -c credential.helper= -c credential.helper=wincred
 
+REM --- 代理 -----------------------------------------------------------------
+REM 直连 GitHub 在国内基本不通。不同梯子的本地端口不一样，写死一个
+REM 就换一个软件就废了 —— 挨个试，看哪个能返回 200。
+REM 先用 git ls-remote 试：已经能连通就完全不动用户的代理环境。
+echo 正在检测网络...
+git ls-remote origin >nul 2>&1
+if errorlevel 1 (
+  echo   直连不通，正在找本机代理...
+  set FOUND_PORT=
+  for %%P in (12000 7890 10809 7897 1080 10808 8080 8888) do (
+    if not defined FOUND_PORT (
+      set http_proxy=http://127.0.0.1:%%P
+      set https_proxy=http://127.0.0.1:%%P
+      set HTTP_PROXY=http://127.0.0.1:%%P
+      set HTTPS_PROXY=http://127.0.0.1:%%P
+      %GITCRED% ls-remote origin >nul 2>&1
+      if not errorlevel 1 set FOUND_PORT=%%P
+    )
+  )
+  if defined FOUND_PORT (
+    set http_proxy=http://127.0.0.1:!FOUND_PORT!
+    set https_proxy=http://127.0.0.1:!FOUND_PORT!
+    set HTTP_PROXY=http://127.0.0.1:!FOUND_PORT!
+    set HTTPS_PROXY=http://127.0.0.1:!FOUND_PORT!
+    echo   找到代理：127.0.0.1:!FOUND_PORT!
+  ) else (
+    echo   没找到可用代理。如果推送报 Connection was reset，请确认梯子已启动。
+  )
+)
+echo.
+
 REM --- 第一步：看远端现在有什么 -------------------------------------------
 REM 建仓时勾了 Go 模板，GitHub 自己生成并提交了一个 .gitignore。那个 commit
 REM 和本地 14 个提交没有共同祖先，是两条独立的根，所以普通 push 一定被拒：

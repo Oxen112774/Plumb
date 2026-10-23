@@ -34,9 +34,22 @@ echo
 # 找到就用，找不到就用当前的 http_proxy（可能已经配好了）。
 find_proxy() {
   for p in 12000 7890 10809 7897 1080 10808 8080 8888; do
-    code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 6 \
-           -x "http://127.0.0.1:$p" https://api.github.com 2>/dev/null)
-    if [ "$code" = "200" ]; then
+    # 用 git 自己试，而不是 curl。curl 判据不可靠：github.com 首页是
+    # JS 渲染的，curl 拿到的是空壳；api.github.com 对无认证请求返回
+    # 403（限流），会被误判成"不通"。git ls-remote 才是真正的推送前置
+    # 条件 —— 它通了，推送就一定能通。
+    #
+    # 四个代理变量必须全设。git 读 curl 的代理时，小写优先于大写：
+    # 只设 HTTPS_PROXY 而留着 https_proxy，旧的那个会继续生效，
+    # 于是"换了代理其实没换"。
+    #
+    # GIT_TERMINAL_PROMPT=0 也必须带：不带的话 git 会停下来等终端输入
+    # 用户名密码，每个端口要等 30 秒超时，8 个端口就是 4 分钟。
+    if http_proxy="http://127.0.0.1:$p" https_proxy="http://127.0.0.1:$p" \
+       HTTP_PROXY="http://127.0.0.1:$p" HTTPS_PROXY="http://127.0.0.1:$p" \
+       GIT_TERMINAL_PROMPT=0 \
+       git -c credential.helper= -c credential.helper=wincred \
+       ls-remote origin >/dev/null 2>&1; then
       echo "$p"
       return 0
     fi
@@ -49,8 +62,11 @@ if git ls-remote origin >/dev/null 2>&1; then
 else
   PROXY_PORT=$(find_proxy)
   if [ -n "$PROXY_PORT" ]; then
+    # 四个都要设。小写优先于大写，只设大写的话旧的小写值还在生效。
     export http_proxy="http://127.0.0.1:$PROXY_PORT"
     export https_proxy="$http_proxy"
+    export HTTP_PROXY="$http_proxy"
+    export HTTPS_PROXY="$http_proxy"
     echo "代理：自动探测到 127.0.0.1:$PROXY_PORT 已设置"
   else
     echo "代理：没探测到可用端口，沿用当前设置"
@@ -95,7 +111,21 @@ echo "第 2 步：推送"
 echo "  用户名：Oxen112774"
 echo "  密码：  Personal Access Token（ghp_ 开头那串）"
 echo
-git push --force-with-lease -u origin main
+
+# credential-helper-selector 会弹一个 GUI 对话框让你选凭据来源。
+# 在双击 bat 运行的场景下没人点它，git 就那么干等着 —— 表现为
+# push 卡住不动，日志里能看到 credential-helper-selector get 之后
+# 长时间没有下文。显式清掉 selector、直接用 wincred，绕开那个弹窗。
+#
+# GIT_TERMINAL_PROMPT=0 同样必要：不带的话 git 会退回到问终端要
+# 用户名密码，脚本里没人回答，就一直等到超时。
+#
+# 注意 sh 里不能用 "VAR=value cmd" 这种写法（那是 bash 的语法，sh 会
+# 报 command not found），所以用 export 把变量设到当前 shell。
+export GIT_TERMINAL_PROMPT=0
+GIT_CRED="git -c credential.helper= -c credential.helper=wincred"
+
+$GIT_CRED push --force-with-lease -u origin main
 RC=$?
 if [ $RC -ne 0 ]; then
   echo
@@ -115,7 +145,7 @@ if git rev-parse v1.0.2 >/dev/null 2>&1; then
 else
   git tag -a v1.0.2 -m "内核栈归因、PSI、cgroup/K8s，以及一棵 102 叶的知识树"
 fi
-git push origin v1.0.2 2>/dev/null && echo "  标签已推送" || echo "  标签推送跳过（多半是已存在）"
+$GIT_CRED push origin v1.0.2 2>/dev/null && echo "  标签已推送" || echo "  标签推送跳过（多半是已存在）"
 echo
 
 # --- 核对 ---------------------------------------------------------------
