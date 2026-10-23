@@ -68,3 +68,9 @@ coverage.txt
 # 本地临时文件（磁盘排查、脚本产物），不入库。
 _*.txt
 *.tmp
+
+# "nul" 是 Windows 的保留设备名，不是文件名。Git Bash 里执行
+# `... 2>nul` 会真的创建一个叫 nul 的文件，而它既删不掉也改不了名
+# （Windows 拒绝任何对 NUL 设备的路径操作）。只能挡在仓库外。
+# 真正该修的是那些命令里的 `2>nul` —— 在 Git Bash 下要写 2>/dev/null。
+/nul
