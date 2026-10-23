@@ -17,6 +17,7 @@ builds:
     goos:
       - linux
       - darwin
+      - windows
     goarch:
       - amd64
       - arm64
@@ -33,6 +34,19 @@ archives:
     files:
       - README.md
       - LICENSE
+    # Windows gets zip instead; it is not listed here so it does not also
+    # get a tar.gz it cannot unpack.
+    goos:
+      - linux
+      - darwin
+  # Windows cannot unpack tar.gz the way the unix ones do, so it gets zip.
+  - id: plumb-windows
+    formats: [zip]
+    name_template: "plumb_{{ .Os }}_{{ .Arch }}"
+    files:
+      - README.md
+      - LICENSE
+    goos: windows
 
 checksum:
   name_template: "checksums.txt"

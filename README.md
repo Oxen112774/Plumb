@@ -472,6 +472,12 @@ install -m 0755 plumb /usr/local/bin/plumb
 go install github.com/Oxen112774/plumb/cmd/plumb@latest
 ```
 
+Windows 上是 zip（Windows 不认 tar.gz），解出来是 `plumb.exe`：
+
+```bat
+curl -LO https://github.com/Oxen112774/plumb/releases/latest/download/plumb_windows_amd64.zip
+```
+
 跑起来只要 30 秒，不需要先读文档。**完整归因需要 root**，见下面的「权限」。
 
 ## 用法
