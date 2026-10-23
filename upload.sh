@@ -25,6 +25,40 @@ echo "仓库：$(git remote get-url origin)"
 echo "本地提交：$(git rev-list --count HEAD) 个"
 echo
 
+# --- 代理 -----------------------------------------------------------------
+# 直连 GitHub 在国内基本不通，必须走梯子。
+# 这里不写死端口，而是探测本机哪个代理端口能通 GitHub —— 不同梯子的
+# 端口不一样，写死了一个就换一个软件就废了。
+#
+# 探测方法：拿几个常见端口挨个试，看谁能返回 200。
+# 找到就用，找不到就用当前的 http_proxy（可能已经配好了）。
+find_proxy() {
+  for p in 12000 7890 10809 7897 1080 10808 8080 8888; do
+    code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 6 \
+           -x "http://127.0.0.1:$p" https://api.github.com 2>/dev/null)
+    if [ "$code" = "200" ]; then
+      echo "$p"
+      return 0
+    fi
+  done
+  return 1
+}
+
+if git ls-remote origin >/dev/null 2>&1; then
+  echo "代理：当前设置已能连通，不改动"
+else
+  PROXY_PORT=$(find_proxy)
+  if [ -n "$PROXY_PORT" ]; then
+    export http_proxy="http://127.0.0.1:$PROXY_PORT"
+    export https_proxy="$http_proxy"
+    echo "代理：自动探测到 127.0.0.1:$PROXY_PORT 已设置"
+  else
+    echo "代理：没探测到可用端口，沿用当前设置"
+    echo "  （如果推送报 Connection was reset，请确认梯子已启动）"
+  fi
+fi
+echo
+
 # --- 关键：为什么用 force-with-lease --------------------------------------
 # 建仓时勾了 Go 模板，GitHub 自己生成了一个 .gitignore 并提交。
 # 那个 commit 和本地 14 个提交没有共同祖先，是两条独立的根。
@@ -68,7 +102,7 @@ if [ $RC -ne 0 ]; then
   echo "推送失败。常见原因："
   echo "  · 粘贴的是账户密码 —— GitHub 从 2021 年起不接受账户密码推代码，"
   echo "    必须用 Token：https://github.com/settings/tokens/new （勾 repo）"
-  echo "  · 网络问题 —— 检查代理或 VPN"
+  echo "  · 代理没通 —— 上面没探测到端口时，确认梯子已启动后重跑"
   echo "  · 报 stale info —— 远端在你 fetch 之后又被改过，重新跑一次本脚本"
   exit $RC
 fi
