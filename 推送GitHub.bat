@@ -18,6 +18,10 @@ REM ===================================================================
 setlocal enabledelayedexpansion
 cd /d "%~dp0"
 
+REM 本文件是 UTF-8 编码。中文 Windows 的 cmd 默认用 GBK 解码，
+REM 不切代码页的话下面所有中文提示都会变成乱码。
+chcp 65001 >nul
+
 echo.
 echo  plumb · 推送到 GitHub
 echo  ----------------------
@@ -87,9 +91,9 @@ REM
 REM 唯一既干净又可靠的办法：--force-with-lease 覆盖掉那个模板提交。
 REM 远端只有 GitHub 自己生成的一个 .gitignore，没有有价值的内容需要保留。
 REM --force-with-lease 会在远端被别人改过时主动拒绝，而不是闷头覆盖。
-echo正在检查远端状态...
+echo 正在检查远端状态...
 %GITCRED% fetch origin main >nul 2>&1
-for /f "%%c in ('git ls-tree --name-only -r origin/main 2^>nul ^| find /c /') do set FILECOUNT=%%c
+for /f %%c in ('git ls-tree --name-only -r origin/main 2^>nul ^| find /c /v ""') do set FILECOUNT=%%c
 if not defined FILECOUNT set FILECOUNT=0
 
 if "!FILECOUNT!"=="1" (
@@ -137,7 +141,7 @@ echo  仓库地址：https://github.com/Oxen112774/Plumb
 echo.
 echo  正在核对远端...
 %GITCRED% fetch origin main >nul 2>&1
-for /f "%%c in ('git ls-tree --name-only -r origin/main 2^>nul ^| find /c /') do set FILECOUNT=%%c
+for /f %%c in ('git ls-tree --name-only -r origin/main 2^>nul ^| find /c /v ""') do set FILECOUNT=%%c
 echo  远端文件数：!FILECOUNT!
 echo.
 echo  接下来值得做的一件事：
