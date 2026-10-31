@@ -35,6 +35,11 @@ jobs:
       - name: go test
         run: go test ./...
 
+      # Race detection needs cgo, which the dev machine (Windows, no C
+      # toolchain) cannot provide — so it only runs here, on Linux.
+      - name: go test -race
+        run: go test -race ./...
+
       # The development machine is Windows, so a change that builds there and
       # not on Linux would otherwise reach main unnoticed.
       - name: build linux
