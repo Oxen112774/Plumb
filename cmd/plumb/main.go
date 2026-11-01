@@ -40,7 +40,7 @@ import (
 // -ldflags "-X main.version=..." rather than keeping the same number correct in
 // two places. A binary that reports the wrong version is worse than one that
 // reports none: it is the first thing anyone checks when a fix does not land.
-var version = "1.0.2"
+var version = "1.0.3"
 
 // stdoutIsTerminal reports whether standard output is a console rather than a
 // pipe, a file or a CI log.
